@@ -18,18 +18,52 @@
 """
 Deepdoctection wrappers for fasttext language detection models
 """
-from copy import copy
-from typing import List, Mapping
+from __future__ import annotations
 
-from ..utils.file_utils import Requirement, fasttext_available, get_fasttext_requirement
-from ..utils.settings import TypeOrStr
-from .base import DetectionResult, LanguageDetector, PredictorBase
+import os
+from abc import ABC
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Mapping, Union
 
-if fasttext_available():
+from lazy_imports import try_import
+
+from ..utils.file_utils import Requirement, get_fasttext_requirement
+from ..utils.settings import TypeOrStr, get_type
+from ..utils.types import PathLikeOrStr
+from .base import DetectionResult, LanguageDetector, ModelCategories
+
+with try_import() as import_guard:
     from fasttext import load_model  # type: ignore
 
 
-class FasttextLangDetector(LanguageDetector):
+class FasttextLangDetectorMixin(LanguageDetector, ABC):
+    """
+    Base class for Fasttext language detection implementation. This class only implements the basic wrapper functions.
+    """
+
+    def __init__(self, categories: Mapping[int, TypeOrStr], categories_orig: Mapping[str, TypeOrStr]) -> None:
+        """
+        :param categories: A dict with the model output label and value. We use as convention the ISO 639-2 language
+        """
+        self.categories = ModelCategories(init_categories=categories)
+        self.categories_orig = MappingProxyType({cat_orig: get_type(cat) for cat_orig, cat in categories_orig.items()})
+
+    def output_to_detection_result(self, output: Union[tuple[Any, Any]]) -> DetectionResult:
+        """
+        Generating `DetectionResult` from model output
+        :param output: FastText model output
+        :return: `DetectionResult` filled with `text` and `score`
+        """
+        return DetectionResult(text=self.categories_orig[output[0][0]], score=output[1][0])
+
+    @staticmethod
+    def get_name(path_weights: PathLikeOrStr) -> str:
+        """Returns the name of the model"""
+        return "fasttext_" + "_".join(Path(path_weights).parts[-2:])
+
+
+class FasttextLangDetector(FasttextLangDetectorMixin):
     """
     Fasttext language detector wrapper. Two models provided in the fasttext library can be used to identify languages.
     The background to the models can be found in the works:
@@ -51,25 +85,38 @@ class FasttextLangDetector(LanguageDetector):
 
     """
 
-    def __init__(self, path_weights: str, categories: Mapping[str, TypeOrStr]):
+    def __init__(
+        self, path_weights: PathLikeOrStr, categories: Mapping[int, TypeOrStr], categories_orig: Mapping[str, TypeOrStr]
+    ):
         """
         :param path_weights: path to model weights
         :param categories: A dict with the model output label and value. We use as convention the ISO 639-2 language
                            code.
         """
+        super().__init__(categories, categories_orig)
 
-        self.name = "fasttest_lang_detector"
-        self.path_weights = path_weights
-        self.model = load_model(self.path_weights)
-        self.categories = copy(categories)  # type: ignore
+        self.path_weights = Path(path_weights)
+
+        self.name = self.get_name(self.path_weights)
+        self.model_id = self.get_model_id()
+
+        self.model = self.get_wrapped_model(self.path_weights)
 
     def predict(self, text_string: str) -> DetectionResult:
         output = self.model.predict(text_string)
-        return DetectionResult(text=self.categories[output[0][0]], score=output[1][0])
+        return self.output_to_detection_result(output)
 
     @classmethod
-    def get_requirements(cls) -> List[Requirement]:
+    def get_requirements(cls) -> list[Requirement]:
         return [get_fasttext_requirement()]
 
-    def clone(self) -> PredictorBase:
-        return self.__class__(self.path_weights, self.categories)
+    def clone(self) -> FasttextLangDetector:
+        return self.__class__(self.path_weights, self.categories.get_categories(), self.categories_orig)
+
+    @staticmethod
+    def get_wrapped_model(path_weights: PathLikeOrStr) -> Any:
+        """
+        Get the wrapped model
+        :param path_weights: path to model weights
+        """
+        return load_model(os.fspath(path_weights))

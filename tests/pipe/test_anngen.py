@@ -26,6 +26,7 @@ from pytest import mark
 from deepdoctection.datapoint import Image, ImageAnnotation
 from deepdoctection.extern.base import DetectionResult
 from deepdoctection.pipe.anngen import DatapointManager
+from deepdoctection.utils.identifier import get_uuid_from_str
 from deepdoctection.utils.settings import get_type
 
 
@@ -43,7 +44,7 @@ class TestDatapointManager:
         test set_image_annotation
         """
         # Arrange
-        dp_manager = DatapointManager()
+        dp_manager = DatapointManager(service_id="d0b8e9f3", model_id="test_model")
         dp_manager.datapoint = dp_image
 
         # Act
@@ -63,7 +64,7 @@ class TestDatapointManager:
         test set_image_annotation with image_ann_to_image
         """
         # Arrange
-        dp_manager = DatapointManager()
+        dp_manager = DatapointManager(service_id="test_service", model_id="test_model")
         dp_manager.datapoint = dp_image
 
         # Act
@@ -82,7 +83,7 @@ class TestDatapointManager:
         """
 
         # Arrange
-        dp_manager = DatapointManager()
+        dp_manager = DatapointManager(service_id="test_service", model_id="test_model")
         dp_manager.datapoint = dp_image
         img_ann_id = dp_manager.set_image_annotation(layout_detect_results[0], to_image=True)
 
@@ -106,7 +107,7 @@ class TestDatapointManager:
         """
 
         # Arrange
-        dp_manager = DatapointManager()
+        dp_manager = DatapointManager(service_id="test_service", model_id="test_model")
         dp_manager.datapoint = dp_image
         ann_id = dp_manager.set_image_annotation(layout_detect_results[0])
 
@@ -118,7 +119,7 @@ class TestDatapointManager:
         ann = dp_manager.datapoint.get_annotation(annotation_ids=ann_id)
         cat_ann = ann[0].get_sub_category(get_type("FOO"))
 
-        assert cat_ann.category_id == "5"
+        assert cat_ann.category_id == 5
         assert cat_ann.score == 0.8
         assert cat_ann.category_name == "foo"
 
@@ -130,7 +131,7 @@ class TestDatapointManager:
         """
 
         # Arrange
-        dp_manager = DatapointManager()
+        dp_manager = DatapointManager(service_id="test_service", model_id="test_model")
         dp_manager.datapoint = dp_image
         ann_id = dp_manager.set_image_annotation(layout_detect_results[0])
 
@@ -144,11 +145,35 @@ class TestDatapointManager:
         ann = dp_manager.datapoint.get_annotation(annotation_ids=ann_id)
         cont_ann = ann[0].get_sub_category(get_type("FOO"))
 
-        assert cont_ann.category_id == "5"
+        assert cont_ann.category_id == 5
         assert cont_ann.score == 0.8
         assert cont_ann.category_name == "foo"
         assert cont_ann.value == "hello world"  # type: ignore
         assert cont_ann.annotation_id == cont_ann_id
+
+    @staticmethod
+    @mark.basic
+    def set_relationship_annotation(dp_image: Image, layout_detect_results: List[DetectionResult]) -> None:
+        """
+        test set_relationship_annotation
+        """
+
+        # Arrange
+        dp_manager = DatapointManager(service_id="test_service", model_id="test_model")
+        dp_manager.datapoint = dp_image
+        target_ann_id = dp_manager.set_image_annotation(layout_detect_results[0])
+        ann_id = get_uuid_from_str("FOO")
+
+        # Act
+        assert ann_id is not None
+        assert target_ann_id is not None
+        dp_manager.set_relationship_annotation(get_type("FOO"), target_ann_id, ann_id)
+
+        # Assert
+        ann = dp_manager.datapoint.get_annotation(annotation_ids=target_ann_id)
+        all_relationships = ann[0].get_relationship(get_type("FOO"))
+
+        assert all_relationships == [ann_id]
 
     @staticmethod
     @mark.basic
@@ -158,7 +183,7 @@ class TestDatapointManager:
         """
 
         # Arrange
-        dp_manager = DatapointManager()
+        dp_manager = DatapointManager(service_id="test_service", model_id="test_model")
         dp_manager.datapoint = dp_image
         ann_id = dp_manager.set_image_annotation(layout_detect_results[0], to_image=True)
 
@@ -168,12 +193,12 @@ class TestDatapointManager:
         ann = dp_manager.datapoint.get_annotation(annotation_ids=ann_id)
 
         # Assert
-        cat_1 = dp_manager.datapoint.summary.get_sub_category(get_type("foo"))  # type: ignore
+        cat_1 = dp_manager.datapoint.summary.get_sub_category(get_type("foo"))
         assert cat_1.annotation_id == summ_id_1
         assert cat_1.category_name == "foo"
-        assert cat_1.category_id == "1"
+        assert cat_1.category_id == 1
 
         cat_2 = ann[0].get_summary(get_type("bak"))
         assert cat_2.annotation_id == summ_id_2
         assert cat_2.category_name == "bak"
-        assert cat_2.category_id == "2"
+        assert cat_2.category_id == 2

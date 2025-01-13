@@ -12,17 +12,18 @@ Some DataFlow classes for serialization. Many classes have been taken from
 
 import pickle
 from copy import copy
-from typing import Any, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Iterable, Iterator, Optional, Union
 
 import numpy as np
 
-from .base import DataFlow, DataFlowResetStateNotCalled, RNGDataFlow
+from ..utils.error import DataFlowResetStateNotCalledError
+from .base import DataFlow, RNGDataFlow
 
 
 class DataFromList(RNGDataFlow):
     """Wrap a list of datapoints to a DataFlow"""
 
-    def __init__(self, lst: List[Any], shuffle: bool = True) -> None:
+    def __init__(self, lst: list[Any], shuffle: bool = True) -> None:
         """
         :param lst: input list. Each element is a datapoint.
         :param shuffle: shuffle data.
@@ -44,7 +45,7 @@ class DataFromList(RNGDataFlow):
                 for k in idxs:
                     yield self.lst[k]
             else:
-                raise DataFlowResetStateNotCalled()
+                raise DataFlowResetStateNotCalledError()
 
 
 class DataFromIterable(DataFlow):
@@ -63,7 +64,7 @@ class DataFromIterable(DataFlow):
 
     def __len__(self) -> int:
         if self._len is None:
-            raise NotImplementedError
+            raise NotImplementedError()
         return self._len
 
     def __iter__(self) -> Iterator[Any]:
@@ -78,11 +79,11 @@ class FakeData(RNGDataFlow):
 
     def __init__(
         self,
-        shapes: List[Union[List[Any], Tuple[Any]]],
+        shapes: list[Union[list[Any], tuple[Any]]],
         size: int = 1000,
         random: bool = True,
         dtype: str = "float32",
-        domain: Tuple[Union[float, int], Union[float, int]] = (0, 1),
+        domain: tuple[Union[float, int], Union[float, int]] = (0, 1),
     ):
         """
         :param  shapes: a list of lists/tuples. Shapes of each component.
@@ -107,7 +108,7 @@ class FakeData(RNGDataFlow):
 
     def __iter__(self) -> Iterator[Any]:
         if self.rng is None:
-            raise DataFlowResetStateNotCalled()
+            raise DataFlowResetStateNotCalledError()
         if self.random:
             for _ in range(self._size):
                 val = []

@@ -18,19 +18,14 @@
 """
 Module for training Detectron2 `GeneralizedRCNN`
 """
-
+from __future__ import annotations
 
 import copy
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Type, Union
+import os
+from pathlib import Path
+from typing import Any, Mapping, Optional, Sequence, Type, Union
 
-from detectron2.config import CfgNode, get_cfg
-from detectron2.data import DatasetMapper, build_detection_train_loader
-from detectron2.data.transforms import RandomFlip, ResizeShortestEdge
-from detectron2.engine import DefaultTrainer, HookBase, default_writers, hooks
-from detectron2.utils import comm
-from detectron2.utils.events import EventWriter, get_event_storage
-from fvcore.nn.precise_bn import get_bn_modules  # type: ignore
-from torch.utils.data import DataLoader, IterableDataset
+from lazy_imports import try_import
 
 from ..datasets.adapter import DatasetAdapter
 from ..datasets.base import DatasetBase
@@ -39,21 +34,35 @@ from ..eval.base import MetricBase
 from ..eval.eval import Evaluator
 from ..eval.registry import metric_registry
 from ..extern.d2detect import D2FrcnnDetector
-from ..extern.pt.ptutils import get_num_gpu
 from ..mapper.d2struct import image_to_d2_frcnn_training
-from ..pipe.base import PredictorPipelineComponent
+from ..pipe.base import PipelineComponent
 from ..pipe.registry import pipeline_component_registry
+from ..utils.error import DependencyError
 from ..utils.file_utils import get_wandb_requirement, wandb_available
-from ..utils.logger import logger
+from ..utils.logger import LoggingRecord, logger
+from ..utils.types import PathLikeOrStr
 from ..utils.utils import string_to_dict
 
-if wandb_available():
+with try_import() as d2_import_guard:
+    from detectron2.config import CfgNode, get_cfg
+    from detectron2.data import DatasetMapper, build_detection_train_loader
+    from detectron2.data.transforms import RandomFlip, ResizeShortestEdge
+    from detectron2.engine import DefaultTrainer, HookBase, default_writers, hooks
+    from detectron2.utils import comm
+    from detectron2.utils.events import EventWriter, get_event_storage
+    from fvcore.nn.precise_bn import get_bn_modules  # type: ignore
+
+with try_import() as pt_import_guard:
+    from torch import cuda
+    from torch.utils.data import DataLoader, IterableDataset
+
+with try_import() as wb_import_guard:
     import wandb
 
 
 def _set_config(
-    path_config_yaml: str,
-    conf_list: List[str],
+    path_config_yaml: PathLikeOrStr,
+    conf_list: list[str],
     dataset_train: DatasetBase,
     dataset_val: Optional[DatasetBase],
     metric_name: Optional[str],
@@ -68,7 +77,7 @@ def _set_config(
     cfg.WANDB.USE_WANDB = False
     cfg.WANDB.PROJECT = None
     cfg.WANDB.REPO = "deepdoctection"
-    cfg.merge_from_file(path_config_yaml)
+    cfg.merge_from_file(path_config_yaml.as_posix() if isinstance(path_config_yaml, Path) else path_config_yaml)
     cfg.merge_from_list(conf_list)
 
     cfg.TEST.DO_EVAL = (
@@ -83,7 +92,7 @@ def _set_config(
     return cfg
 
 
-def _update_for_eval(config_overwrite: List[str]) -> List[str]:
+def _update_for_eval(config_overwrite: list[str]) -> list[str]:
     ret = [item for item in config_overwrite if not "WANDB" in item]
     return ret
 
@@ -97,7 +106,7 @@ class WandbWriter(EventWriter):
         self,
         project: str,
         repo: str,
-        config: Optional[Union[Dict[str, Any], CfgNode]] = None,
+        config: Optional[Union[dict[str, Any], CfgNode]] = None,
         window_size: int = 20,
         **kwargs: Any,
     ):
@@ -111,7 +120,7 @@ class WandbWriter(EventWriter):
             config = {}
         self._window_size = window_size
         self._run = wandb.init(project=project, config=config, **kwargs) if not wandb.run else wandb.run
-        self._run._label(repo=repo)  # type:ignore
+        self._run._label(repo=repo)
 
     def write(self) -> None:
         storage = get_event_storage()
@@ -120,10 +129,10 @@ class WandbWriter(EventWriter):
         for key, (val, _) in storage.latest_with_smoothing_hint(self._window_size).items():
             log_dict[key] = val
 
-        self._run.log(log_dict)  # type:ignore
+        self._run.log(log_dict)
 
     def close(self) -> None:
-        self._run.finish()  # type:ignore
+        self._run.finish()
 
 
 class D2Trainer(DefaultTrainer):
@@ -139,7 +148,7 @@ class D2Trainer(DefaultTrainer):
         self.build_val_dict: Mapping[str, str] = {}
         super().__init__(cfg)
 
-    def build_hooks(self) -> List[HookBase]:
+    def build_hooks(self) -> list[HookBase]:
         """
         Overwritten from DefaultTrainer. This ensures that the EvalHook is being called before the writer and
         all metrics are being written to JSON, Tensorboard etc.
@@ -153,16 +162,18 @@ class D2Trainer(DefaultTrainer):
         ret = [
             hooks.IterationTimer(),
             hooks.LRScheduler(),
-            hooks.PreciseBN(
-                # Run at the same freq as (but before) evaluation.
-                cfg.TEST.EVAL_PERIOD,
-                self.model,  # pylint: disable=E1101
-                # Build a new data loader to not affect training
-                self.build_train_loader(cfg),
-                cfg.TEST.PRECISE_BN.NUM_ITER,
-            )
-            if cfg.TEST.PRECISE_BN.ENABLED and get_bn_modules(self.model)  # pylint: disable=E1101
-            else None,
+            (
+                hooks.PreciseBN(
+                    # Run at the same freq as (but before) evaluation.
+                    cfg.TEST.EVAL_PERIOD,
+                    self.model,  # pylint: disable=E1101
+                    # Build a new data loader to not affect training
+                    self.build_train_loader(cfg),
+                    cfg.TEST.PRECISE_BN.NUM_ITER,
+                )
+                if cfg.TEST.PRECISE_BN.ENABLED and get_bn_modules(self.model)  # pylint: disable=E1101
+                else None
+            ),
         ]
 
         # Do PreciseBN before checkpointer, because it updates the model and need to
@@ -189,7 +200,7 @@ class D2Trainer(DefaultTrainer):
 
         return ret
 
-    def build_writers(self) -> List[EventWriter]:
+    def build_writers(self) -> list[EventWriter]:
         """
         Build a list of writers to be using `default_writers()`.
         If you'd like a different list of writers, you can overwrite it in
@@ -201,7 +212,7 @@ class D2Trainer(DefaultTrainer):
         if self.cfg.WANDB.USE_WANDB:
             _, _wandb_available, err_msg = get_wandb_requirement()
             if not _wandb_available:
-                raise ImportError(err_msg)
+                raise DependencyError(err_msg)
             if self.cfg.WANDB.PROJECT is None:
                 raise ValueError("When using W&B, you must specify a project, i.e. WANDB.PROJECT")
             writers_list.append(WandbWriter(self.cfg.WANDB.PROJECT, self.cfg.WANDB.REPO, self.cfg))
@@ -218,7 +229,7 @@ class D2Trainer(DefaultTrainer):
             dataset=self.dataset, mapper=self.mapper, total_batch_size=cfg.SOLVER.IMS_PER_BATCH
         )
 
-    def eval_with_dd_evaluator(self, **build_eval_kwargs: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    def eval_with_dd_evaluator(self, **build_eval_kwargs: str) -> Union[list[dict[str, Any]], dict[str, Any]]:
         """
         Running the Evaluator. This method will be called from the `EvalHook`
 
@@ -235,7 +246,7 @@ class D2Trainer(DefaultTrainer):
     def setup_evaluator(
         self,
         dataset_val: DatasetBase,
-        pipeline_component: PredictorPipelineComponent,
+        pipeline_component: PipelineComponent,
         metric: Union[Type[MetricBase], MetricBase],
         build_val_dict: Optional[Mapping[str, str]] = None,
     ) -> None:
@@ -256,28 +267,26 @@ class D2Trainer(DefaultTrainer):
             dataset_val,
             pipeline_component,
             metric,
-            num_threads=get_num_gpu() * 2,
+            num_threads=cuda.device_count() * 2,
             run=run,
         )
         if build_val_dict:
             self.build_val_dict = build_val_dict
         assert self.evaluator.pipe_component
         for comp in self.evaluator.pipe_component.pipe_components:
-            assert isinstance(comp, PredictorPipelineComponent)
-            assert isinstance(comp.predictor, D2FrcnnDetector)
-            comp.predictor.d2_predictor = None
+            comp.clear_predictor()
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name):  # type: ignore
-        raise NotImplementedError
+        raise NotImplementedError()
 
 
 def train_d2_faster_rcnn(
-    path_config_yaml: str,
+    path_config_yaml: PathLikeOrStr,
     dataset_train: Union[str, DatasetBase],
-    path_weights: str,
-    config_overwrite: Optional[List[str]] = None,
-    log_dir: str = "train_log/frcnn",
+    path_weights: PathLikeOrStr,
+    config_overwrite: Optional[list[str]] = None,
+    log_dir: PathLikeOrStr = "train_log/frcnn",
     build_train_config: Optional[Sequence[str]] = None,
     dataset_val: Optional[DatasetBase] = None,
     build_val_config: Optional[Sequence[str]] = None,
@@ -332,15 +341,15 @@ def train_d2_faster_rcnn(
     :param pipeline_component_name: A pipeline component name to use for validation.
     """
 
-    assert get_num_gpu() > 0, "Has to train with GPU!"
+    assert cuda.device_count() > 0, "Has to train with GPU!"
 
-    build_train_dict: Dict[str, str] = {}
+    build_train_dict: dict[str, str] = {}
     if build_train_config is not None:
         build_train_dict = string_to_dict(",".join(build_train_config))
     if "split" not in build_train_dict:
         build_train_dict["split"] = "train"
 
-    build_val_dict: Dict[str, str] = {}
+    build_val_dict: dict[str, str] = {}
     if build_val_config is not None:
         build_val_dict = string_to_dict(",".join(build_val_config))
     if "split" not in build_val_dict:
@@ -350,9 +359,9 @@ def train_d2_faster_rcnn(
         config_overwrite = []
     conf_list = [
         "MODEL.WEIGHTS",
-        path_weights,
+        os.fspath(path_weights),
         "OUTPUT_DIR",
-        log_dir,
+        os.fspath(log_dir),
     ]
     for conf in config_overwrite:
         key, val = conf.split("=", maxsplit=1)
@@ -368,11 +377,13 @@ def train_d2_faster_rcnn(
     if metric_name is not None:
         metric = metric_registry.get(metric_name)
 
-    dataset = DatasetAdapter(dataset_train, True, image_to_d2_frcnn_training(False), True, **build_train_dict)
+    dataset = DatasetAdapter(
+        dataset_train, True, image_to_d2_frcnn_training(False), True, number_repetitions=-1, **build_train_dict
+    )
     augment_list = [ResizeShortestEdge(cfg.INPUT.MIN_SIZE_TRAIN, cfg.INPUT.MAX_SIZE_TRAIN), RandomFlip()]
     mapper = DatasetMapper(is_train=True, augmentations=augment_list, image_format="BGR")
 
-    logger.info("Config: \n %s", str(cfg), cfg)
+    logger.info(LoggingRecord(f"Config: \n {str(cfg)}", dict(cfg)))
 
     trainer = D2Trainer(cfg, dataset, mapper)
     trainer.resume_or_load()
@@ -383,7 +394,6 @@ def train_d2_faster_rcnn(
         detector = D2FrcnnDetector(path_config_yaml, path_weights, categories, config_overwrite, cfg.MODEL.DEVICE)
         pipeline_component_cls = pipeline_component_registry.get(pipeline_component_name)
         pipeline_component = pipeline_component_cls(detector)
-        assert isinstance(pipeline_component, PredictorPipelineComponent)
 
         if metric_name is not None:
             metric = metric_registry.get(metric_name)

@@ -20,6 +20,10 @@ Some useful function for collecting environment information.
 
 This is also the place where we give an overview of the important environment variables.
 
+For env variables with boolean character, use one of the following values:
+
+{"1", "True", "TRUE", "true", "yes"}
+
 `USE_TENSORFLOW
 USE_PYTORCH
 USE_CUDA
@@ -28,12 +32,18 @@ USE_MPS`
 are responsible for selecting the predictors based on the installed DL framework and available devices.
 It is not recommended to touch them.
 
-`USE_PILLOW
-USE_OPENCV`
+`USE_DD_PILLOW
+USE_DD_OPENCV`
 
 decide what image processing library the `viz_handler` should use. The default library is PIL and OpenCV need
 to be installed separately. However, if both libraries have been detected `viz_handler` will opt for OpenCV.
 Use the variables to let choose `viz_handler` according to your preferences.
+
+`USE_DD_POPPLER
+USE_DD_PDFIUM`
+
+For PDF rendering we use PyPDFium2 as default but for legacy reasons, we also support Poppler. If you want to enforce
+Poppler set one to `USE_DD_POPPLER=True` and `USE_DD_PDFIUM=False` the other to False.
 
 `HF_CREDENTIALS`
 
@@ -46,16 +56,17 @@ can store an (absolute) path to a `.jsonl` file.
 
 """
 
-import ast
 import importlib
 import os
 import re
 import subprocess
 import sys
 from collections import defaultdict
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import numpy as np
+from packaging import version
+from pypdf.errors import DependencyError
 from tabulate import tabulate
 
 from .file_utils import (
@@ -68,12 +79,14 @@ from .file_utils import (
     fasttext_available,
     get_poppler_version,
     get_tesseract_version,
+    get_tf_version,
     jdeskew_available,
     lxml_available,
     opencv_available,
     pdf_to_cairo_available,
     pdf_to_ppm_available,
     pdfplumber_available,
+    pypdfium2_available,
     pytorch_available,
     qpdf_available,
     scipy_available,
@@ -84,17 +97,14 @@ from .file_utils import (
     transformers_available,
     wandb_available,
 )
-from .logger import logger
+from .logger import LoggingRecord, logger
+from .types import KeyValEnvInfos, PathLikeOrStr
 
-__all__ = [
-    "collect_torch_env",
-    "collect_env_info",
-    "get_device",
-    "auto_select_lib_and_device",
-    "auto_select_viz_library",
-]
+__all__ = ["collect_env_info", "auto_select_viz_library", "auto_select_pdf_render_framework", "ENV_VARS_TRUE"]
 
 # pylint: disable=import-outside-toplevel
+
+ENV_VARS_TRUE: set[str] = {"1", "True", "TRUE", "true", "yes"}
 
 
 def collect_torch_env() -> str:
@@ -110,7 +120,7 @@ def collect_torch_env() -> str:
         return get_pretty_env_info()
 
 
-def collect_installed_dependencies(data: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+def collect_installed_dependencies(data: KeyValEnvInfos) -> KeyValEnvInfos:
     """Collect installed dependencies for all third party libraries.
 
     :param data: A list of tuples to dump all collected package information such as the name and the version
@@ -127,7 +137,7 @@ def collect_installed_dependencies(data: List[Tuple[str, str]]) -> List[Tuple[st
     if opencv_available():
         import cv2
 
-        data.append(("OpenCV", cv2.__version__))  # type: ignore
+        data.append(("OpenCV", cv2.__version__))
     else:
         data.append(("OpenCV", "None"))
 
@@ -178,7 +188,7 @@ def collect_installed_dependencies(data: List[Tuple[str, str]]) -> List[Tuple[st
         data.append(("Pycocotools", "None"))
 
     if scipy_available():
-        import scipy  # type: ignore
+        import scipy
 
         data.append(("Scipy", scipy.__version__))
     else:
@@ -235,7 +245,7 @@ def collect_installed_dependencies(data: List[Tuple[str, str]]) -> List[Tuple[st
     return data
 
 
-def detect_compute_compatibility(cuda_home: Optional[str], so_file: Optional[str]) -> str:
+def detect_compute_compatibility(cuda_home: Optional[PathLikeOrStr], so_file: Optional[PathLikeOrStr]) -> str:
     """
     Detect the compute compatibility of a CUDA library.
 
@@ -261,7 +271,7 @@ def detect_compute_compatibility(cuda_home: Optional[str], so_file: Optional[str
 
 
 # Copied from https://github.com/tensorpack/tensorpack/blob/master/tensorpack/tfutils/collect_env.py
-def tf_info(data: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+def tf_info(data: KeyValEnvInfos) -> KeyValEnvInfos:
     """Returns a list of (key, value) pairs containing tensorflow information.
 
     :param data: A list of tuples to dump all collected package information such as the name and the version
@@ -270,21 +280,42 @@ def tf_info(data: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
     if tf_available():
         import tensorflow as tf  # type: ignore # pylint: disable=E0401
 
+        os.environ["TENSORFLOW_AVAILABLE"] = "1"
+
         data.append(("Tensorflow", tf.__version__))
+        if version.parse(get_tf_version()) > version.parse("2.4.1"):
+            os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+        try:
+            import tensorflow.python.util.deprecation as deprecation  # type: ignore # pylint: disable=E0401,R0402,E0611
+
+            deprecation._PRINT_DEPRECATION_WARNINGS = False  # pylint: disable=W0212
+        except Exception:  # pylint: disable=W0703
+            try:
+                from tensorflow.python.util import deprecation  # type: ignore # pylint: disable=E0401,E0611
+
+                deprecation._PRINT_DEPRECATION_WARNINGS = False  # pylint: disable=W0212
+            except Exception:  # pylint: disable=W0703
+                pass
     else:
         data.append(("Tensorflow", "None"))
         return data
 
-    from tensorflow.python.platform import build_info  # type: ignore # pylint: disable=E0401
+    from tensorflow.python.platform import build_info  # type: ignore # pylint: disable=E0401,E0611
 
     try:
         for key, value in list(build_info.build_info.items()):
-            if key == "cuda_version":
+            if key == "is_cuda_build":
+                data.append(("TF compiled with CUDA", value))
+                if value and len(tf.config.list_physical_devices("GPU")):
+                    os.environ["USE_CUDA"] = "1"
+            elif key == "cuda_version":
                 data.append(("TF built with CUDA", value))
             elif key == "cudnn_version":
                 data.append(("TF built with CUDNN", value))
             elif key == "cuda_compute_capabilities":
                 data.append(("TF compute capabilities", ",".join([k.replace("compute_", "") for k in value])))
+            elif key == "is_rocm_build":
+                data.append(("TF compiled with ROCM", value))
         return data
     except AttributeError:
         pass
@@ -297,7 +328,7 @@ def tf_info(data: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
 
 
 # Heavily inspired by https://github.com/facebookresearch/detectron2/blob/main/detectron2/utils/collect_env.py
-def pt_info(data: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+def pt_info(data: KeyValEnvInfos) -> KeyValEnvInfos:
     """Returns a list of (key, value) pairs containing Pytorch information.
 
     :param data: A list of tuples to dump all collected package information such as the name and the version
@@ -306,6 +337,13 @@ def pt_info(data: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
 
     if pytorch_available():
         import torch
+
+        os.environ["PYTORCH_AVAILABLE"] = "1"
+
+    else:
+        data.append(("PyTorch", "None"))
+        return []
+
     has_gpu = torch.cuda.is_available()  # true for both CUDA & ROCM
     has_mps = torch.backends.mps.is_available()
 
@@ -331,12 +369,9 @@ def pt_info(data: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
     data.append(("PyTorch", torch_version + " @" + os.path.dirname(torch.__file__)))
     data.append(("PyTorch debug build", str(torch.version.debug)))
 
-    if not has_gpu:
-        has_gpu_text = "No: torch.cuda.is_available() == False"
-    else:
-        has_gpu_text = "Yes"
-    data.append(("GPU available", has_gpu_text))
     if has_gpu:
+        os.environ["USE_CUDA"] = "1"
+        has_gpu_text = "Yes"
         devices = defaultdict(list)
         for k in range(torch.cuda.device_count()):
             cap = ".".join((str(x) for x in torch.cuda.get_device_capability(k)))
@@ -362,6 +397,10 @@ def pt_info(data: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
             cuda_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST", None)
             if cuda_arch_list:
                 data.append(("TORCH_CUDA_ARCH_LIST", cuda_arch_list))
+    else:
+        has_gpu_text = "No: torch.cuda.is_available() == False"
+
+    data.append(("GPU available", has_gpu_text))
 
     mps_build = "No: torch.backends.mps.is_built() == False"
     if not has_mps:
@@ -369,9 +408,11 @@ def pt_info(data: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
     else:
         has_mps_text = "Yes"
         mps_build = str(torch.backends.mps.is_built())
+        if mps_build == "True":
+            os.environ["USE_MPS"] = "1"
 
     data.append(("MPS available", has_mps_text))
-    data.append(("MPS available", mps_build))
+    data.append(("MPS built", mps_build))
 
     try:
         import torchvision  # type: ignore
@@ -393,6 +434,42 @@ def pt_info(data: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
         data.append(("torchvision", "unknown"))
 
     return data
+
+
+def set_dl_env_vars() -> None:
+    """Set the environment variables that steer the selection of the DL framework.
+    If both PyTorch and TensorFlow are available, PyTorch will be selected by default.
+    It is possible that for testing purposes, e.g. on Colab you can find yourself with a pre-installed Tensorflow
+    version. If you want to enforce PyTorch you must set:
+
+    os.environ["DD_USE_TORCH"] = "1"
+    os.environ["USE_TORCH"] = "1"      # necessary if you make use of DocTr's OCR engine
+    os.environ["DD_USE_TF"] = "0"
+    os.environ["USE_TF"] = "0"      # it's better to explcitly disable Tensorflow
+
+
+    """
+
+    if os.environ.get("PYTORCH_AVAILABLE") and os.environ.get("DD_USE_TORCH") is None:
+        os.environ["DD_USE_TORCH"] = "1"
+        os.environ["USE_TORCH"] = "1"
+    if os.environ.get("TENSORFLOW_AVAILABLE") and os.environ.get("DD_USE_TF") is None:
+        os.environ["DD_USE_TF"] = "1"
+        os.environ["USE_TF"] = "1"
+
+    if os.environ.get("DD_USE_TORCH", "0") in ENV_VARS_TRUE and os.environ.get("DD_USE_TF", "0") in ENV_VARS_TRUE:
+        logger.warning(
+            "Both DD_USE_TORCH and DD_USE_TF are set. Defaulting to PyTorch. If you want a different "
+            "behaviour, set DD_USE_TORCH to None before importing deepdoctection."
+        )
+        os.environ["DD_USE_TF"] = "0"
+        os.environ["USE_TF"] = "0"
+
+    if (
+        os.environ.get("PYTORCH_AVAILABLE") not in ENV_VARS_TRUE
+        and os.environ.get("TENSORFLOW_AVAILABLE") not in ENV_VARS_TRUE
+    ):
+        logger.warning(LoggingRecord(msg="Neither Tensorflow or Pytorch are available."))
 
 
 def collect_env_info() -> str:
@@ -420,7 +497,7 @@ def collect_env_info() -> str:
     try:
         import prctl  # type: ignore
 
-        _ = prctl.set_pdeathsig  # noqa
+        _ = prctl.set_pdeathsig  # pylint: disable=E1101
     except ModuleNotFoundError:
         has_prctl = False
     data.append(("python-prctl", str(has_prctl)))
@@ -441,6 +518,7 @@ def collect_env_info() -> str:
 
     data = pt_info(data)
     data = tf_info(data)
+    set_dl_env_vars()
 
     data = collect_installed_dependencies(data)
 
@@ -452,81 +530,35 @@ def collect_env_info() -> str:
     return env_str
 
 
-def auto_select_lib_and_device() -> None:
-    """
-    Select the DL library and subsequently the device.
-    This will set environment variable `USE_TENSORFLOW`, `USE_PYTORCH` and `USE_CUDA`
-
-    If TF is available, use TF unless a GPU is not available, in which case choose PT. If CUDA is not available and PT
-    is not installed raise ImportError.
-    """
-
-    if tf_available() and tensorpack_available():
-        from tensorpack.utils.gpu import get_num_gpu  # pylint: disable=E0401
-
-        if get_num_gpu() >= 1:
-            os.environ["USE_TENSORFLOW"] = "True"
-            os.environ["USE_PYTORCH"] = "False"
-            os.environ["USE_CUDA"] = "True"
-            os.environ["USE_MPS"] = "False"
-            return
-        if pytorch_available():
-            os.environ["USE_TENSORFLOW"] = "False"
-            os.environ["USE_PYTORCH"] = "True"
-            os.environ["USE_CUDA"] = "False"
-            return
-        logger.warning("You have Tensorflow installed but no GPU is available. All Tensorflow models require a GPU.")
-    if pytorch_available():
-        import torch
-
-        if torch.cuda.is_available():
-            os.environ["USE_TENSORFLOW"] = "False"
-            os.environ["USE_PYTORCH"] = "True"
-            os.environ["USE_CUDA"] = "True"
-            return
-        if torch.backends.mps.is_available():
-            os.environ["USE_TENSORFLOW"] = "False"
-            os.environ["USE_PYTORCH"] = "True"
-            os.environ["USE_CUDA"] = "False"
-            os.environ["USE_MPS"] = "True"
-            return
-        os.environ["USE_TENSORFLOW"] = "False"
-        os.environ["USE_PYTORCH"] = "True"
-        os.environ["USE_CUDA"] = "False"
-        os.environ["USE_MPS"] = "False"
-        return
-    logger.warning(
-        "Neither Tensorflow or Pytorch are available. You will not be able to use any Deep Learning model from"
-        " the library."
-    )
-
-
-def get_device(ignore_cpu: bool = True) -> str:
-    """
-    Device checks for running PyTorch with CUDA, MPS or optionall CPU.
-    If nothing can be found and if `disable_cpu` is deactivated it will raise a `ValueError`
-
-    :param ignore_cpu: Will not consider `cpu` as valid return value
-    :return: Either cuda or mps
-    """
-
-    if ast.literal_eval(os.environ.get("USE_CUDA", "True")):
-        return "cuda"
-    if ast.literal_eval(os.environ.get("USE_MPS", "True")):
-        return "mps"
-    if not ignore_cpu:
-        return "cpu"
-    raise ValueError("Could not find either GPU nor MPS")
-
-
 def auto_select_viz_library() -> None:
     """Setting PIL as default image library if cv2 is not installed"""
+
+    # if env variables are already set, don't change them
+    if os.environ.get("USE_DD_PILLOW") or os.environ.get("USE_DD_OPENCV"):
+        return
     if opencv_available():
-        os.environ["USE_PILLOW"] = "False"
-        os.environ["USE_OPENCV"] = "True"
+        os.environ["USE_DD_PILLOW"] = "False"
+        os.environ["USE_DD_OPENCV"] = "True"
     else:
-        os.environ["USE_PILLOW"] = "True"
-        os.environ["USE_OPENCV"] = "False"
+        os.environ["USE_DD_PILLOW"] = "True"
+        os.environ["USE_DD_OPENCV"] = "False"
+
+
+def auto_select_pdf_render_framework() -> None:
+    """Setting pdf2image as default pdf rendering library if pdfium is not installed"""
+
+    # if env variables are already set, don't change them
+    if os.environ.get("USE_DD_POPPLER") or os.environ.get("USE_DD_PDFIUM"):
+        return
+    if pypdfium2_available():
+        os.environ["USE_DD_POPPLER"] = "False"
+        os.environ["USE_DD_PDFIUM"] = "True"
+        return
+    if pdf_to_cairo_available() or pdf_to_ppm_available():
+        os.environ["USE_DD_POPPLER"] = "True"
+        os.environ["USE_DD_PDFIUM"] = "False"
+        return
+    raise DependencyError("No pdf rendering library found. Please install Poppler or pdfium.")
 
 
 # pylint: enable=import-outside-toplevel

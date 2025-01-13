@@ -31,7 +31,8 @@ pipelines. Its core function does not depend on any specific deep learning libra
  - Text mining for native PDFs with  [**pdfplumber**](https://github.com/jsvine/pdfplumber), 
  - Language detection with [**fastText**](https://github.com/facebookresearch/fastText),
  - Deskewing and rotating images with [**jdeskew**](https://github.com/phamquiluan/jdeskew). 
- - Document and token classification with all LayoutLM models provided by the Transformer library. 
+ - Document and token classification with all LayoutLM models provided by the 
+   [**Transformer library**](https://github.com/huggingface/transformers). 
    (Yes, you can use any LayoutLM-model with any of the provided OCR-or pdfplumber tools straight away!).
  - Table detection and table structure recognition with 
    [**table-transformer**](https://github.com/microsoft/table-transformer). 
@@ -41,8 +42,20 @@ pipelines. Its core function does not depend on any specific deep learning libra
  - Comprehensive configuration of **analyzer** like choosing different models, output parsing, OCR selection.
    Check this [notebook](https://github.com/deepdoctection/notebooks/blob/main/Analyzer_Configuration.ipynb) or the 
    [docs](https://deepdoctection.readthedocs.io/en/latest/tutorials/analyzer_configuration_notebook/) for more infos.
- - [**new**] Document layout analysis and table recognition now runs with Torchscript (CPU) as well and Detectron2 is 
-   not required anymore for basic inference. 
+ - Document layout analysis and table recognition now runs with 
+   [**Torchscript**](https://pytorch.org/docs/stable/jit.html) (CPU) as well and [**Detectron2**](https://github.com/facebookresearch/detectron2/tree/main/detectron2) is not required 
+   anymore for basic inference.
+ - More angle predictors for determining the rotation of a document based on [**Tesseract**](https://github.com/tesseract-ocr/tesseract) and [**DocTr**](https://github.com/mindee/doctr)
+ - Token classification with [**LiLT**](https://github.com/jpWang/LiLT) via 
+   [**transformers**](https://github.com/huggingface/transformers). 
+   We have added a model wrapper for token classification with LiLT and added a some LiLT models to the model catalog 
+   that seem to look promising, especially if you want to train a model on non-english data. The training script for 
+   LayoutLM can be used for LiLT as well.
+ - [**new**] There are two notebooks available that show, how to write a 
+   [custom predictor](https://github.com/deepdoctection/notebooks/blob/main/Doclaynet_Analyzer_Config.ipynb) based on 
+   a third party library that has not been supported yet and how to use 
+   [advanced configuration](https://github.com/deepdoctection/notebooks/blob/main/Doclaynet_Analyzer_Config.ipynb) to 
+   get links between layout segments e.g. captions and tables or figures.
 
 **deep**doctection provides on top of that methods for pre-processing inputs to models like cropping or resizing and to 
 post-process results, like validating duplicate outputs, relating words to detected layout segments or ordering words 
@@ -127,21 +140,24 @@ documentation.
 
 ## Requirements
 
-![requirements](https://github.com/deepdoctection/deepdoctection/raw/master/docs/tutorials/_imgs/requirements_deepdoctection.png)
+![requirements](https://github.com/deepdoctection/deepdoctection/raw/master/docs/tutorials/_imgs/requirements_deepdoctection_081124.png)
 
 Everything in the overview listed below the **deep**doctection layer are necessary requirements and have to be installed 
 separately. 
 
 - Linux or macOS. (Windows is not supported but there is a [Dockerfile](./docker/pytorch-cpu-jupyter/Dockerfile) available)
-- Python >= 3.8
-- 1.12 <= PyTorch < 2.0 **or** Tensorflow >= 2.9 and CUDA. If you want to run the models provided by Tensorpack a GPU is
-  required. You can run on PyTorch with a CPU only.
-- **deep**doctection uses Python wrappers for [Poppler](https://poppler.freedesktop.org/) to convert PDF documents into 
-images. 
+- Python >= 3.9
+- 1.13 <= PyTorch  **or** 2.11 <= Tensorflow < 2.16. (For lower Tensorflow versions the code will only run on a GPU).
+In general, if you want to train or fine-tune models, a GPU is required.
+
 - With respect to the Deep Learning framework, you must decide between [Tensorflow](https://www.tensorflow.org/install?hl=en)
   and [PyTorch](https://pytorch.org/get-started/locally/).
 - [Tesseract](https://github.com/tesseract-ocr/tesseract) OCR engine will be used through a Python wrapper. The core 
   engine has to be installed separately.
+
+
+- For release `v.0.34.0` and below **deep**doctection uses Python wrappers for [Poppler](https://poppler.freedesktop.org/) to convert PDF
+  documents into images. For release `v.0.35.0` this dependency will be optional.
 
 The following overview shows the availability of the models in conjunction with the DL framework.
 
@@ -260,8 +276,8 @@ to develop this framework.
 ## Problems
 
 We try hard to eliminate bugs. We also know that the code is not free of issues. We welcome all issues relevant to this
-repo and try to address them as quickly as possible. Bug fixes or enhancements will be deployed in a new release every 4 
-to 6 weeks.
+repo and try to address them as quickly as possible. Bug fixes or enhancements will be deployed in a new release every 10 
+to 12 weeks.
 
 ## If you like **deep**doctection ...
  

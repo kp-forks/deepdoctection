@@ -19,7 +19,7 @@
 Testing module pipe.segment
 """
 
-from typing import List
+from typing import List, Sequence, Union
 
 from pytest import mark
 
@@ -42,8 +42,8 @@ def test_stretch_items(dp_image_tab_cell_item: Image, dp_image_item_stretched: I
     # Arrange
     dp = dp_image_tab_cell_item
     dp_expected = dp_image_item_stretched
-    table_name = LayoutType.table
-    item_names = [LayoutType.row, LayoutType.column]
+    table_name = LayoutType.TABLE
+    item_names = [LayoutType.ROW, LayoutType.COLUMN]
 
     # Act
     dp = stretch_items(dp, table_name, item_names[0], item_names[1], 0.001, 0.001)
@@ -87,6 +87,10 @@ class TestTableSegmentationService:
         self._remove_iou_threshold_rows = 0.001
         self._remove_iou_threshold_cols = 0.001
         self._tile_table_with_items = False
+        self.table_name = LayoutType.TABLE
+        self.cell_names = [CellType.HEADER, CellType.BODY, LayoutType.CELL]
+        self.item_names = [LayoutType.ROW, LayoutType.COLUMN]
+        self.sub_item_names = [CellType.ROW_NUMBER, CellType.COLUMN_NUMBER]
 
         self.table_segmentation_service = TableSegmentationService(
             self._segment_rule,  # type: ignore
@@ -95,6 +99,10 @@ class TestTableSegmentationService:
             self._tile_table_with_items,
             self._remove_iou_threshold_rows,
             self._remove_iou_threshold_cols,
+            self.table_name,
+            self.cell_names,
+            self.item_names,
+            self.sub_item_names,
         )
 
     @mark.basic
@@ -110,8 +118,8 @@ class TestTableSegmentationService:
 
         # Assert items have correctly assigned sub categories row/col number
         for item_name, sub_item_name in zip(
-            self.table_segmentation_service._item_names,  # pylint: disable=W0212
-            self.table_segmentation_service._sub_item_names,  # pylint: disable=W0212
+            self.table_segmentation_service.item_names,  # pylint: disable=W0212
+            self.table_segmentation_service.sub_item_names,  # pylint: disable=W0212
         ):
             items = dp.get_annotation(category_names=item_name)
             items_expected = dp_expected.get_annotation(category_names=item_name)
@@ -122,32 +130,30 @@ class TestTableSegmentationService:
                 assert item_cat.category_id == item_cat_expected.category_id
 
         # Assert cells have correctly assigned sub categories row/col/rs/cs number
-        cells = dp.get_annotation_iter(
-            category_names=self.table_segmentation_service._cell_names  # pylint: disable=W0212
-        )
-        cells_expected = dp_expected.get_annotation_iter(
-            category_names=self.table_segmentation_service._cell_names  # pylint: disable=W0212
+        cells = dp.get_annotation(category_names=self.table_segmentation_service.cell_names)  # pylint: disable=W0212
+        cells_expected = dp_expected.get_annotation(
+            category_names=self.table_segmentation_service.cell_names  # pylint: disable=W0212
         )
 
         for el in zip(cells, cells_expected):
             cell, cell_expected = el[0], el[1]
-            row_sub_cat = cell.get_sub_category(CellType.row_number)
-            row_sub_cat_expected = cell_expected.get_sub_category(CellType.row_number)
+            row_sub_cat = cell.get_sub_category(CellType.ROW_NUMBER)
+            row_sub_cat_expected = cell_expected.get_sub_category(CellType.ROW_NUMBER)
             assert row_sub_cat.category_name == row_sub_cat_expected.category_name
             assert row_sub_cat.category_id == row_sub_cat_expected.category_id
 
-            col_sub_cat = cell.get_sub_category(CellType.column_number)
-            col_sub_cat_expected = cell_expected.get_sub_category(CellType.column_number)
+            col_sub_cat = cell.get_sub_category(CellType.COLUMN_NUMBER)
+            col_sub_cat_expected = cell_expected.get_sub_category(CellType.COLUMN_NUMBER)
             assert col_sub_cat.category_name == col_sub_cat_expected.category_name
             assert col_sub_cat.category_id == col_sub_cat_expected.category_id
 
-            rs_sub_cat = cell.get_sub_category(CellType.row_span)
-            rs_sub_cat_expected = cell_expected.get_sub_category(CellType.row_span)
+            rs_sub_cat = cell.get_sub_category(CellType.ROW_SPAN)
+            rs_sub_cat_expected = cell_expected.get_sub_category(CellType.ROW_SPAN)
             assert rs_sub_cat.category_name == rs_sub_cat_expected.category_name
             assert rs_sub_cat.category_id == rs_sub_cat_expected.category_id
 
-            cs_sub_cat = cell.get_sub_category(CellType.column_span)
-            cs_sub_cat_expected = cell_expected.get_sub_category(CellType.column_span)
+            cs_sub_cat = cell.get_sub_category(CellType.COLUMN_SPAN)
+            cs_sub_cat_expected = cell_expected.get_sub_category(CellType.COLUMN_SPAN)
             assert cs_sub_cat.category_name == cs_sub_cat_expected.category_name
             assert cs_sub_cat.category_id == cs_sub_cat_expected.category_id
 
@@ -164,23 +170,23 @@ def test_tile_tables_with_items_per_table(
 
     # Arrange
     dp = dp_image_item_stretched
-    rows = dp.get_annotation_iter(category_names=LayoutType.row)
-    cols = dp.get_annotation_iter(category_names=LayoutType.column)
+    rows = dp.get_annotation(category_names=LayoutType.ROW)
+    cols = dp.get_annotation(category_names=LayoutType.COLUMN)
 
     for row, col, row_sub_cat, col_sub_cat in zip(rows, cols, row_sub_cats, col_sub_cats):
-        row.dump_sub_category(CellType.row_number, row_sub_cat)
-        col.dump_sub_category(CellType.column_number, col_sub_cat)
+        row.dump_sub_category(CellType.ROW_NUMBER, row_sub_cat)
+        col.dump_sub_category(CellType.COLUMN_NUMBER, col_sub_cat)
 
-    table = dp.get_annotation(category_names=LayoutType.table)
-    item_names = [LayoutType.row, LayoutType.column]  # row names must be before column name
+    table = dp.get_annotation(category_names=LayoutType.TABLE)
+    item_names = [LayoutType.ROW, LayoutType.COLUMN]  # row names must be before column name
 
     # Act
     dp = tile_tables_with_items_per_table(dp, table[0], item_names[0])
     dp = tile_tables_with_items_per_table(dp, table[0], item_names[1])
 
     # Assert
-    rows = dp.get_annotation(category_names=LayoutType.row)
-    cols = dp.get_annotation(category_names=LayoutType.column)
+    rows = dp.get_annotation(category_names=LayoutType.ROW)
+    cols = dp.get_annotation(category_names=LayoutType.COLUMN)
 
     first_row_box = rows[0].get_bounding_box(dp.image_id)
     second_row_box = rows[1].get_bounding_box(dp.image_id)
@@ -213,6 +219,10 @@ class TestTableSegmentationServiceWhenTableFullyTiled:
         self._remove_iou_threshold_rows = 0.001
         self._remove_iou_threshold_cols = 0.001
         self._tile_table_with_items = True
+        self.table_name = LayoutType.TABLE
+        self.cell_names = [CellType.HEADER, CellType.BODY, LayoutType.CELL]
+        self.item_names = [LayoutType.ROW, LayoutType.COLUMN]
+        self.sub_item_names = [CellType.ROW_NUMBER, CellType.COLUMN_NUMBER]
 
         self.tp_table_segmentation_service = TableSegmentationService(
             self._segment_rule,  # type: ignore
@@ -221,6 +231,10 @@ class TestTableSegmentationServiceWhenTableFullyTiled:
             self._tile_table_with_items,
             self._remove_iou_threshold_rows,
             self._remove_iou_threshold_cols,
+            self.table_name,
+            self.cell_names,
+            self.item_names,
+            self.sub_item_names,
         )
 
     @mark.basic
@@ -239,23 +253,21 @@ class TestTableSegmentationServiceWhenTableFullyTiled:
         dp = self.tp_table_segmentation_service.pass_datapoint(dp)
 
         # Assert
-        cells = dp.get_annotation(
-            category_names=self.tp_table_segmentation_service._cell_names  # pylint: disable=W0212
-        )
+        cells = dp.get_annotation(category_names=self.tp_table_segmentation_service.cell_names)  # pylint: disable=W0212
 
         cells_expected = dp_expected.get_annotation(
-            category_names=self.tp_table_segmentation_service._cell_names  # pylint: disable=W0212
+            category_names=self.tp_table_segmentation_service.cell_names  # pylint: disable=W0212
         )
 
         assert len(cells) == len(cells_expected)
 
         for cell, cell_expected in zip(cells, cells_expected):
-            assert cell.get_sub_category(CellType.row_number) == cell_expected.get_sub_category(CellType.row_number)
-            assert cell.get_sub_category(CellType.column_number) == cell_expected.get_sub_category(
-                CellType.column_number
+            assert cell.get_sub_category(CellType.ROW_NUMBER) == cell_expected.get_sub_category(CellType.ROW_NUMBER)
+            assert cell.get_sub_category(CellType.COLUMN_NUMBER) == cell_expected.get_sub_category(
+                CellType.COLUMN_NUMBER
             )
-            assert cell.get_sub_category(CellType.row_span) == cell_expected.get_sub_category(CellType.row_span)
-            assert cell.get_sub_category(CellType.column_span) == cell_expected.get_sub_category(CellType.column_span)
+            assert cell.get_sub_category(CellType.ROW_SPAN) == cell_expected.get_sub_category(CellType.ROW_SPAN)
+            assert cell.get_sub_category(CellType.COLUMN_SPAN) == cell_expected.get_sub_category(CellType.COLUMN_SPAN)
 
 
 @mark.basic
@@ -267,26 +279,26 @@ def test_create_intersection_cells(dp_image_tab_cell_item: Image) -> None:
     # Arrange
     dp = dp_image_tab_cell_item
 
-    rows = dp.get_annotation(category_names=LayoutType.row)
-    cols = dp.get_annotation(category_names=LayoutType.column)
+    rows = dp.get_annotation(category_names=LayoutType.ROW)
+    cols = dp.get_annotation(category_names=LayoutType.COLUMN)
     for idx, items in enumerate(zip(rows, cols)):
         items[0].dump_sub_category(
-            CellType.row_number, CategoryAnnotation(category_name=CellType.row_number, category_id=str(idx + 1))
+            CellType.ROW_NUMBER, CategoryAnnotation(category_name=CellType.ROW_NUMBER, category_id=idx + 1)
         )
         items[1].dump_sub_category(
-            CellType.column_number, CategoryAnnotation(category_name=CellType.column_number, category_id=str(idx + 1))
+            CellType.COLUMN_NUMBER, CategoryAnnotation(category_name=CellType.COLUMN_NUMBER, category_id=idx + 1)
         )
 
-    table = dp.get_annotation(category_names=LayoutType.table)[0]
+    table = dp.get_annotation(category_names=LayoutType.TABLE)[0]
     table_ann_id = table.annotation_id
     detect_result_cells, segment_result_cells = create_intersection_cells(
-        rows, cols, table_ann_id, 5, [CellType.row_number, CellType.column_number]
+        rows, cols, table_ann_id, 5, [CellType.ROW_NUMBER, CellType.COLUMN_NUMBER]
     )
     expected_detect_result = [
-        DetectionResult(box=[15.0, 100.0, 20.0, 150.0], class_id=5, class_name=LayoutType.cell),
-        DetectionResult(box=[40.0, 100.0, 50.0, 150.0], class_id=5, class_name=LayoutType.cell),
-        DetectionResult(box=[15.0, 200.0, 20.0, 240.0], class_id=5, class_name=LayoutType.cell),
-        DetectionResult(box=[40.0, 200.0, 50.0, 240.0], class_id=5, class_name=LayoutType.cell),
+        DetectionResult(box=[15.0, 100.0, 20.0, 150.0], class_id=5, class_name=LayoutType.CELL),
+        DetectionResult(box=[40.0, 100.0, 50.0, 150.0], class_id=5, class_name=LayoutType.CELL),
+        DetectionResult(box=[15.0, 200.0, 20.0, 240.0], class_id=5, class_name=LayoutType.CELL),
+        DetectionResult(box=[40.0, 200.0, 50.0, 240.0], class_id=5, class_name=LayoutType.CELL),
     ]
     expected_segment_result = [
         SegmentationResult(row_num=1, col_num=1, rs=1, cs=1, annotation_id=""),
@@ -317,6 +329,24 @@ class TestPubtablesSegmentationService:
         self._remove_iou_threshold_cols = 0.001
         self._tile_table_with_items = True
         self.cell_class_id = 5
+        self.table_name = LayoutType.TABLE
+        self.cell_names: Sequence[Union[LayoutType, CellType]] = [
+            CellType.SPANNING,
+            CellType.ROW_HEADER,
+            CellType.COLUMN_HEADER,
+            CellType.PROJECTED_ROW_HEADER,
+            LayoutType.CELL,
+        ]
+        self.spanning_cell_names = [
+            CellType.SPANNING,
+            CellType.ROW_HEADER,
+            CellType.COLUMN_HEADER,
+            CellType.PROJECTED_ROW_HEADER,
+        ]
+        self.item_names = [LayoutType.ROW, LayoutType.COLUMN]
+        self.sub_item_names = [CellType.ROW_NUMBER, CellType.COLUMN_NUMBER]
+        self.item_header_cell_names = [CellType.ROW_HEADER, CellType.COLUMN_HEADER]
+        self.item_header_thresholds = [0.001, 0.001]
 
         self.table_segmentation_service = PubtablesSegmentationService(
             "ioa",
@@ -326,6 +356,13 @@ class TestPubtablesSegmentationService:
             self._remove_iou_threshold_rows,
             self._remove_iou_threshold_cols,
             self.cell_class_id,
+            self.table_name,
+            self.cell_names,
+            self.spanning_cell_names,
+            self.item_names,
+            self.sub_item_names,
+            self.item_header_cell_names,
+            self.item_header_thresholds,
         )
 
     @mark.basic
@@ -334,23 +371,24 @@ class TestPubtablesSegmentationService:
 
         # Arrange
         dp = dp_image_tab_cell_item
-        cells = dp.get_annotation(category_names=LayoutType.cell)
-        table = dp.get_annotation(category_names=LayoutType.table)[0]
+        cells_ann_ids = [ann.annotation_id for ann in dp.get_annotation(category_names=LayoutType.CELL)]
+        table = dp.get_annotation(category_names=LayoutType.TABLE)[0]
 
-        for cell in cells:
-            dp.remove(cell)
+        dp.remove(annotation_ids=cells_ann_ids)
 
-        tab_cells = table.image.get_annotation(category_names=LayoutType.cell)  # type: ignore
-        for cell in tab_cells:
-            table.image.remove(cell)  # type: ignore
+        tab_cells_ann_ids = [
+            ann.annotation_id for ann in table.image.get_annotation(category_names=LayoutType.CELL)  # type: ignore
+        ]
+
+        table.image.remove(annotation_ids=tab_cells_ann_ids)  # type: ignore
 
         # Act
         dp = self.table_segmentation_service.pass_datapoint(dp)
 
         # Assert
-        rows = dp.get_annotation(category_names=LayoutType.row)
-        cols = dp.get_annotation(category_names=LayoutType.column)
-        cells = dp.get_annotation(category_names=LayoutType.cell)
+        rows = dp.get_annotation(category_names=LayoutType.ROW)
+        cols = dp.get_annotation(category_names=LayoutType.COLUMN)
+        cells = dp.get_annotation(category_names=LayoutType.CELL)
 
         assert len(rows) == 2
         assert len(cols) == 2

@@ -23,16 +23,16 @@ import inspect
 import os
 from collections.abc import MutableMapping
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Sequence, Set, Union
+from typing import Any, Callable, Sequence, Union
 
 import numpy as np
 
-from .detection_types import Pathlike
+from .types import PathLikeOrStr
 
 
 def delete_keys_from_dict(
-    dictionary: Union[Dict[Any, Any], MutableMapping], keys: Union[str, List[str], Set[str]]  # type: ignore
-) -> Dict[Any, Any]:
+    dictionary: Union[dict[Any, Any], MutableMapping], keys: Union[str, list[str], set[str]]  # type: ignore
+) -> dict[Any, Any]:
     """
     Removing key/value pairs from dictionary. Works for nested dicts as well.
 
@@ -62,7 +62,7 @@ def delete_keys_from_dict(
     return modified_dict
 
 
-def split_string(input_string: str) -> List[str]:
+def split_string(input_string: str) -> list[str]:
     """
     Takes a string, splits between commas and returns a list with split components as list elements
 
@@ -71,7 +71,7 @@ def split_string(input_string: str) -> List[str]:
     return input_string.split(",")
 
 
-def string_to_dict(input_string: str) -> Dict[str, str]:
+def string_to_dict(input_string: str) -> dict[str, str]:
     """
     Takes a string of a form `key1=val1,key2=val2` and returns the corresponding dict
     """
@@ -144,13 +144,7 @@ def get_rng(obj: Any = None) -> np.random.RandomState:
     return np.random.RandomState(seed)
 
 
-class FileExtensionError(BaseException):
-    """
-    An exception indicating that a file does not seem to have an expected type
-    """
-
-
-def is_file_extension(file_name: Pathlike, extension: Union[str, Sequence[str]]) -> bool:
+def is_file_extension(file_name: PathLikeOrStr, extension: Union[str, Sequence[str]]) -> bool:
     """
     Check if a given file name has a given extension
 
@@ -161,3 +155,42 @@ def is_file_extension(file_name: Pathlike, extension: Union[str, Sequence[str]])
     if isinstance(extension, str):
         return os.path.splitext(file_name)[-1].lower() == extension
     return os.path.splitext(file_name)[-1].lower() in extension
+
+
+def partition_list(base_list: list[str], stop_value: str) -> list[list[str]]:
+    """
+    Partitions a list of strings into sublists, where each sublist starts with the first occurrence of the stop value.
+    Consecutive stop values are grouped together in the same sublist.
+
+    :param base_list: The list of strings to be partitioned.
+    :param stop_value: The string value that indicates the start of a new partition.
+    :return: A list of lists, where each sublist is a partition of the original list.
+
+    ** Example:**
+
+        strings = ['a', 'a', 'c', 'c', 'b', 'd', 'c', 'c', 'a', 'b', 'a', 'b', 'a', 'a']
+        stop_string = 'a'
+        partition_list(strings, stop_string)
+
+       # Output [['a', 'a', 'c', 'c', 'b', 'd', 'c', 'c'], ['a', 'b'], ['a', 'b'], ['a', 'a']]
+    """
+
+    partitions = []
+    current_partition: list[str] = []
+    stop_found = False
+
+    for s in base_list:
+        if s == stop_value:
+            if not stop_found and current_partition:
+                partitions.append(current_partition)
+                current_partition = []
+            current_partition.append(s)
+            stop_found = True
+        else:
+            current_partition.append(s)
+            stop_found = False
+
+    if current_partition:
+        partitions.append(current_partition)
+
+    return partitions

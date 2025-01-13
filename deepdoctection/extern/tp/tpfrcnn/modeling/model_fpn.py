@@ -12,23 +12,28 @@ This file is modified from
 import itertools
 
 import numpy as np
-
-# pylint: disable=import-error
-import tensorflow as tf
-from tensorpack import tfv1
-from tensorpack.models import Conv2D, FixedUnPooling, MaxPooling, layer_register
-from tensorpack.tfutils.argscope import argscope
-from tensorpack.tfutils.scope_utils import under_name_scope
-from tensorpack.tfutils.summary import add_moving_summary
-from tensorpack.tfutils.tower import get_current_tower_context
-from tensorpack.utils.argtools import memoized
+from lazy_imports import try_import
 
 from ..utils.box_ops import area as tf_area
 from .backbone import GroupNorm
 from .model_box import roi_align
 from .model_rpn import generate_rpn_proposals, get_all_anchors, rpn_losses
 
-# pylint: enable=import-error
+with try_import() as import_guard:
+    # pylint: disable=import-error
+    import tensorflow as tf
+    from tensorpack import tfv1
+    from tensorpack.models import Conv2D, FixedUnPooling, MaxPooling, layer_register
+    from tensorpack.tfutils.argscope import argscope
+    from tensorpack.tfutils.scope_utils import under_name_scope
+    from tensorpack.tfutils.summary import add_moving_summary
+    from tensorpack.tfutils.tower import get_current_tower_context
+    from tensorpack.utils.argtools import memoized
+
+    # pylint: enable=import-error
+
+if not import_guard.is_successful():
+    from .....utils.mocks import layer_register, memoized, under_name_scope
 
 
 @layer_register(log_shape=True)
@@ -146,9 +151,9 @@ def multilevel_roi_align(features, rcnn_boxes, resolution, fpn_anchor_strides):
             all_rois.append(roi_align(featuremap, boxes_on_featuremap, resolution))
 
     # this can fail if using TF<=1.8 with MKL build
-    all_rois = tf.concat(all_rois, axis=0)  # NCHW
+    all_rois = tf.concat(all_rois, axis=0)  # NCHW    # pylint: disable=E1123
     # Unshuffle to the original order, to match the original samples
-    level_id_perm = tf.concat(level_ids, axis=0)  # A permutation of 1~N
+    level_id_perm = tf.concat(level_ids, axis=0)  # A permutation of 1~N   # pylint: disable=E1123
     level_id_invert_perm = tf.math.invert_permutation(level_id_perm)
     all_rois = tf.gather(all_rois, level_id_invert_perm, name="output")
     return all_rois
@@ -253,8 +258,8 @@ def generate_fpn_proposals(
                 all_boxes.append(proposal_boxes)
                 all_scores.append(proposal_scores)
 
-        proposal_boxes = tf.concat(all_boxes, axis=0)  # nx4
-        proposal_scores = tf.concat(all_scores, axis=0)  # n
+        proposal_boxes = tf.concat(all_boxes, axis=0)  # nx4  # pylint: disable=E1123
+        proposal_scores = tf.concat(all_scores, axis=0)  # n  # pylint: disable=E1123
         # Here we are different from Detectron.
         # Detectron picks top-k within the batch, rather than within an image, however we do not have a batch.
         proposal_topk = tf.minimum(tf.size(proposal_scores), fpn_nms_top_k)
@@ -266,8 +271,8 @@ def generate_fpn_proposals(
                 pred_boxes_decoded = multilevel_pred_boxes[lvl]
                 all_boxes.append(tf.reshape(pred_boxes_decoded, [-1, 4]))
                 all_scores.append(tf.reshape(multilevel_label_logits[lvl], [-1]))
-        all_boxes = tf.concat(all_boxes, axis=0)
-        all_scores = tf.concat(all_scores, axis=0)
+        all_boxes = tf.concat(all_boxes, axis=0)  # pylint: disable=E1123
+        all_scores = tf.concat(all_scores, axis=0)  # pylint: disable=E1123
         proposal_boxes, proposal_scores = generate_rpn_proposals(
             all_boxes,
             all_scores,

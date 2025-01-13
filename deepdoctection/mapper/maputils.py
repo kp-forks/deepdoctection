@@ -18,20 +18,22 @@
 """
 Utility functions related to mapping tasks
 """
+from __future__ import annotations
+
 import functools
 import itertools
 import traceback
 from types import TracebackType
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
 import numpy as np
 from tabulate import tabulate
 from termcolor import colored
 
-from ..datapoint.box import BoundingBoxError
-from ..utils.detection_types import DP, BaseExceptionType, S, T
-from ..utils.logger import logger
+from ..utils.error import AnnotationError, BoundingBoxError, ImageError, UUIDError
+from ..utils.logger import LoggingRecord, logger
 from ..utils.settings import ObjectTypes
+from ..utils.types import DP, BaseExceptionType, S, T
 
 __all__ = ["MappingContextManager", "DefaultMapper", "maybe_get_fake_score", "LabelSummarizer", "curry"]
 
@@ -43,7 +45,7 @@ class MappingContextManager:
     """
 
     def __init__(
-        self, dp_name: Optional[str] = None, filter_level: str = "image", **kwargs: Dict[str, Optional[str]]
+        self, dp_name: Optional[str] = None, filter_level: str = "image", **kwargs: dict[str, Optional[str]]
     ) -> None:
         """
         :param dp_name: A name for the datapoint to be mapped
@@ -55,7 +57,7 @@ class MappingContextManager:
         self.context_error = True
         self.kwargs = kwargs
 
-    def __enter__(self) -> "MappingContextManager":
+    def __enter__(self) -> MappingContextManager:
         """
         context enter
         """
@@ -71,7 +73,20 @@ class MappingContextManager:
         context exit
         """
         if (
-            exc_type in (KeyError, ValueError, IndexError, AssertionError, TypeError, BoundingBoxError)
+            exc_type
+            in (
+                KeyError,
+                ValueError,
+                IndexError,
+                AssertionError,
+                TypeError,
+                FileNotFoundError,
+                AttributeError,
+                BoundingBoxError,
+                AnnotationError,
+                ImageError,
+                UUIDError,
+            )
             and exc_tb is not None
         ):
             frame_summary = traceback.extract_tb(exc_tb)[0]
@@ -86,7 +101,10 @@ class MappingContextManager:
                 if isinstance(value, dict):
                     log_dict["type"] = key
                     log_dict.update(value)
-            logger.warning("MappingContextManager error. Will filter %s", self.filter_level, log_dict)
+            logger.warning(
+                LoggingRecord(f"MappingContextManager error. Will filter {self.filter_level}", log_dict)  # type: ignore
+            )
+
             return True
         if exc_type is None:
             self.context_error = False
@@ -175,7 +193,7 @@ class LabelSummarizer:
 
     """
 
-    def __init__(self, categories: Mapping[str, ObjectTypes]) -> None:
+    def __init__(self, categories: Mapping[int, ObjectTypes]) -> None:
         """
         :param categories: A dict of categories as given as in categories.get_categories().
         """
@@ -193,11 +211,11 @@ class LabelSummarizer:
         np_item = np.asarray(item, dtype="int8")
         self.summary += np.histogram(np_item, bins=self.hist_bins)[0]
 
-    def get_summary(self) -> Dict[str, np.int32]:
+    def get_summary(self) -> dict[int, int]:
         """
         Get a dictionary with category ids and the number dumped
         """
-        return dict(list(zip(self.categories.keys(), self.summary.astype(np.int32))))
+        return dict(list(zip(self.categories.keys(), self.summary.tolist())))
 
     def print_summary_histogram(self, dd_logic: bool = True) -> None:
         """
@@ -206,11 +224,9 @@ class LabelSummarizer:
         :param dd_logic: Follow dd category convention when printing histogram (last background bucket omitted).
         """
         if dd_logic:
-            data = list(itertools.chain(*[[self.categories[str(i)].value, v] for i, v in enumerate(self.summary, 1)]))
+            data = list(itertools.chain(*[[self.categories[i].value, v] for i, v in enumerate(self.summary, 1)]))
         else:
-            data = list(
-                itertools.chain(*[[self.categories[str(i + 1)].value, v] for i, v in enumerate(self.summary[:-1])])
-            )
+            data = list(itertools.chain(*[[self.categories[i + 1].value, v] for i, v in enumerate(self.summary[:-1])]))
         num_columns = min(6, len(data))
         total_img_anns = sum(data[1::2])
         data.extend([None] * ((num_columns - len(data) % num_columns) % num_columns))
@@ -219,4 +235,4 @@ class LabelSummarizer:
         table = tabulate(
             data, headers=["category", "#box"] * (num_columns // 2), tablefmt="pipe", stralign="center", numalign="left"
         )
-        logger.info("Ground-Truth category distribution:\n %s", colored(table, "cyan"))
+        logger.info(LoggingRecord(f"Ground-Truth category distribution:\n {colored(table, 'cyan')}"))

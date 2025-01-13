@@ -19,25 +19,30 @@
 Module for EvalCallback in Tensorpack
 """
 
+from __future__ import annotations
+
 from itertools import count
 from typing import Mapping, Optional, Sequence, Type, Union
 
+from lazy_imports import try_import
+
 from ..datasets import DatasetBase
-from ..extern.tpdetect import TPFrcnnDetector
-from ..pipe.base import PredictorPipelineComponent
-from ..utils.file_utils import tensorpack_available
-from ..utils.logger import logger
+from ..pipe.base import PipelineComponent
+from ..utils.logger import LoggingRecord, logger
 from ..utils.metacfg import AttrDict
 from ..utils.settings import ObjectTypes
 from .base import MetricBase
 from .eval import Evaluator
 
 # pylint: disable=import-error
-if tensorpack_available():
+with try_import() as import_guard:
     from tensorpack.callbacks import Callback
     from tensorpack.predict import OnlinePredictor
     from tensorpack.utils.gpu import get_num_gpu
 # pylint: enable=import-error
+
+if not import_guard.is_successful():
+    from ..utils.mocks import Callback
 
 
 # The following class is modified from
@@ -53,15 +58,16 @@ class EvalCallback(Callback):  # pylint: disable=R0903
 
     _chief_only = False
 
-    def __init__(
+    def __init__(  # pylint: disable=W0231
         self,
         dataset: DatasetBase,
         category_names: Optional[Union[ObjectTypes, Sequence[ObjectTypes]]],
         sub_categories: Optional[Union[Mapping[ObjectTypes, ObjectTypes], Mapping[ObjectTypes, Sequence[ObjectTypes]]]],
         metric: Union[Type[MetricBase], MetricBase],
-        pipeline_component: PredictorPipelineComponent,
+        pipeline_component: PipelineComponent,
         in_names: str,
         out_names: str,
+        cfg: AttrDict,
         **build_eval_kwargs: str,
     ) -> None:
         """
@@ -83,11 +89,7 @@ class EvalCallback(Callback):  # pylint: disable=R0903
         self.num_gpu = get_num_gpu()
         self.category_names = category_names
         self.sub_categories = sub_categories
-        assert isinstance(pipeline_component.predictor, TPFrcnnDetector), (
-            f"pipeline_component.predictor must be of "
-            f"type TPFrcnnDetector but is type {type(pipeline_component.predictor)}"
-        )
-        self.cfg = pipeline_component.predictor.model.cfg
+        self.cfg = cfg
         if _use_replicated(self.cfg):
             self.evaluator = Evaluator(dataset, pipeline_component, metric, num_threads=self.num_gpu * 2)
         else:
@@ -98,13 +100,9 @@ class EvalCallback(Callback):  # pylint: disable=R0903
             if self.evaluator.pipe_component is None:
                 raise TypeError("self.evaluator.pipe_component cannot be None")
             for idx, comp in enumerate(self.evaluator.pipe_component.pipe_components):
-                if not isinstance(comp, PredictorPipelineComponent):
-                    raise TypeError(f"comp must be of type PredictorPipelineComponent but is type {type(comp)}")
-                if not isinstance(comp.predictor, TPFrcnnDetector):
-                    raise TypeError(
-                        f"comp.predictor mus be of type TPFrcnnDetector but is of type {type(comp.predictor)}"
-                    )
-                comp.predictor.tp_predictor = self._build_predictor(idx % self.num_gpu)
+                if hasattr(comp, "predictor"):
+                    if hasattr(comp.predictor, "tp_predictor"):
+                        comp.predictor.tp_predictor = self._build_predictor(idx % self.num_gpu)
 
     def _build_predictor(self, idx: int) -> OnlinePredictor:
         return self.trainer.get_predictor(self.in_names, self.out_names, device=idx)
@@ -117,7 +115,7 @@ class EvalCallback(Callback):  # pylint: disable=R0903
                 break
             self.epochs_to_eval.add(k * eval_period)
         self.epochs_to_eval.add(self.trainer.max_epoch)
-        logger.info("[EvalCallback] Will evaluate every %i epochs", eval_period)
+        logger.info(LoggingRecord(f"EvalCallback: Will evaluate every {eval_period} epochs"))
 
     def _eval(self) -> None:
         scores = self.evaluator.run(True, **self.build_eval_kwargs)
@@ -126,7 +124,7 @@ class EvalCallback(Callback):  # pylint: disable=R0903
 
     def _trigger_epoch(self) -> None:
         if self.epoch_num in self.epochs_to_eval:
-            logger.info("Running evaluation ...")
+            logger.info(LoggingRecord("Running evaluation ..."))
             self._eval()
 
 

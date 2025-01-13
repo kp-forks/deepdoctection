@@ -9,17 +9,23 @@ This file is modified from
 <https://github.com/tensorpack/tensorpack/blob/master/examples/FasterRCNN/modeling/model_mrcnn.py>
 """
 
-# pylint: disable=import-error
-import tensorflow as tf
-from tensorpack.models import Conv2D, Conv2DTranspose, layer_register
-from tensorpack.tfutils.argscope import argscope
-from tensorpack.tfutils.common import get_tf_version_tuple
-from tensorpack.tfutils.scope_utils import under_name_scope
-from tensorpack.tfutils.summary import add_moving_summary
+from lazy_imports import try_import
 
 from .backbone import GroupNorm
 
-# pylint: enable=import-error
+with try_import() as import_guard:
+    # pylint: disable=import-error
+    import tensorflow as tf
+    from tensorpack.models import Conv2D, Conv2DTranspose, layer_register
+    from tensorpack.tfutils.argscope import argscope
+    from tensorpack.tfutils.common import get_tf_version_tuple
+    from tensorpack.tfutils.scope_utils import under_name_scope
+    from tensorpack.tfutils.summary import add_moving_summary
+
+    # pylint: enable=import-error
+
+if not import_guard.is_successful():
+    from .....utils.mocks import layer_register, under_name_scope
 
 
 @under_name_scope()
@@ -41,7 +47,7 @@ def maskrcnn_loss(mask_logits, fg_labels, fg_target_masks):
 
     # add some training visualizations to tensorboard
     with tf.name_scope("mask_viz"):
-        viz = tf.concat([fg_target_masks, mask_probs], axis=1)
+        viz = tf.concat([fg_target_masks, mask_probs], axis=1)  # pylint: disable=E1123
         viz = tf.expand_dims(viz, 3)
         viz = tf.cast(viz * 255, tf.uint8, name="viz")
         tf.summary.image("mask_truth|pred", viz, max_outputs=10)
@@ -77,7 +83,7 @@ def maskrcnn_upXconv_head(feature, num_category, num_convs, norm=None, **kwargs)
     with argscope(
         [Conv2D, Conv2DTranspose],
         data_format="channels_first",
-        kernel_initializer=tf.variance_scaling_initializer(
+        kernel_initializer=tf.variance_scaling_initializer(  # pylint: disable=E1101
             scale=2.0,
             mode="fan_out",
             distribution="untruncated_normal" if get_tf_version_tuple() >= (1, 12) else "normal",
@@ -121,5 +127,7 @@ def unpackbits_masks(masks):
     assert masks.dtype == tf.uint8, masks
     bits = tf.constant((128, 64, 32, 16, 8, 4, 2, 1), dtype=tf.uint8)
     unpacked = tf.bitwise.bitwise_and(tf.expand_dims(masks, -1), bits) > 0
-    unpacked = tf.reshape(unpacked, tf.concat([tf.shape(masks)[:-1], [8 * tf.shape(masks)[-1]]], axis=0))
+    unpacked = tf.reshape(
+        unpacked, tf.concat([tf.shape(masks)[:-1], [8 * tf.shape(masks)[-1]]], axis=0)  # pylint: disable=E1123
+    )  # pylint: disable=E1123
     return unpacked

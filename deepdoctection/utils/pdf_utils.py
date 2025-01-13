@@ -24,23 +24,38 @@ import subprocess
 import sys
 from errno import ENOENT
 from io import BytesIO
+from pathlib import Path
 from shutil import copyfile
-from typing import Generator, List, Optional, Tuple
+from typing import Generator, Literal, Optional, Union
 
+from lazy_imports import try_import
 from numpy import uint8
-from PyPDF2 import PdfReader, PdfWriter, errors
+from pypdf import PdfReader, PdfWriter, errors
 
 from .context import save_tmp_file, timeout_manager
-from .detection_types import ImageType, Pathlike
-from .file_utils import PopplerNotFound, pdf_to_cairo_available, pdf_to_ppm_available, qpdf_available
-from .logger import logger
-from .utils import FileExtensionError, is_file_extension
+from .env_info import ENV_VARS_TRUE
+from .error import DependencyError, FileExtensionError
+from .file_utils import pdf_to_cairo_available, pdf_to_ppm_available, qpdf_available
+from .logger import LoggingRecord, logger
+from .types import PathLikeOrStr, PixelValues
+from .utils import is_file_extension
 from .viz import viz_handler
 
-__all__ = ["decrypt_pdf_document", "get_pdf_file_reader", "get_pdf_file_writer", "PDFStreamer", "pdf_to_np_array"]
+with try_import() as pt_import_guard:
+    import pypdfium2
+
+__all__ = [
+    "decrypt_pdf_document",
+    "decrypt_pdf_document_from_bytes",
+    "get_pdf_file_reader",
+    "get_pdf_file_writer",
+    "PDFStreamer",
+    "pdf_to_np_array",
+    "split_pdf",
+]
 
 
-def decrypt_pdf_document(path: Pathlike) -> bool:
+def decrypt_pdf_document(path: PathLikeOrStr) -> bool:
     """
     Decrypting a pdf. As copying a pdf document removes the password that protects pdf, this method
     generates a copy and decrypts the copy using qpdf. The result is saved as the original
@@ -54,7 +69,6 @@ def decrypt_pdf_document(path: Pathlike) -> bool:
     :param path: A path to the pdf file
     :return: True if document has been successfully decrypted
     """
-
     if qpdf_available():
         path_base, file_name = os.path.split(path)
         file_name_tmp = os.path.splitext(file_name)[0] + "tmp.pdf"
@@ -66,42 +80,75 @@ def decrypt_pdf_document(path: Pathlike) -> bool:
         if not response:
             return True
     else:
-        logger.info("qpdf is not installed. If the document must be decrypted please ensure that it is installed")
+        logger.info(
+            LoggingRecord("qpdf is not installed. If the document must be decrypted please ensure that it is installed")
+        )
     return False
 
 
-def get_pdf_file_reader(path: Pathlike) -> PdfReader:
+def decrypt_pdf_document_from_bytes(input_bytes: bytes) -> bytes:
+    """
+    Decrypting a pdf given as bytes. Under the hood, it saves the bytes to a temporary file and then calls
+
+    qpdf: <http://qpdf.sourceforge.net/>
+
+    :param input_bytes: A bytes object representing the pdf file
+    :return: The decrypted bytes object
+    """
+    with save_tmp_file(input_bytes, "pdf_") as (_, input_file_name):
+        is_decrypted = decrypt_pdf_document(input_file_name)
+        if is_decrypted:
+            with open(input_file_name, "rb") as file:
+                return file.read()
+        else:
+            logger.error(LoggingRecord("pdf bytes cannot be decrypted and therefore cannot be processed further."))
+            sys.exit()
+
+
+def get_pdf_file_reader(path_or_bytes: Union[PathLikeOrStr, bytes]) -> PdfReader:
     """
     Creates a file reader object from a pdf document. Will try to decrypt the document if it is
     encrypted. (See `decrypt_pdf_document` to understand what is meant with "decrypt").
 
-    :param path: A path to a pdf document
+    :param path_or_bytes: A path to a pdf document
     :return: A file reader object from which you can iterate through the document.
     """
 
-    if not os.path.isfile(path):
-        raise FileNotFoundError(str(path))
-    file_name = os.path.split(path)[1]
+    if isinstance(path_or_bytes, bytes):
+        try:
+            reader = PdfReader(BytesIO(path_or_bytes))
+        except (errors.PdfReadError, AttributeError):
+            decrypted_bytes = decrypt_pdf_document_from_bytes(path_or_bytes)
+            reader = PdfReader(BytesIO(decrypted_bytes))
+        return reader
+
+    if not os.path.isfile(path_or_bytes):
+        raise FileNotFoundError(str(path_or_bytes))
+    file_name = os.path.split(path_or_bytes)[1]
     if not is_file_extension(file_name, ".pdf"):
         raise FileExtensionError(f"must be a pdf file: {file_name}")
 
-    with open(path, "rb") as file:
+    with open(path_or_bytes, "rb") as file:
         qpdf_called = False
         try:
-            input_pdf_as_bytes = PdfReader(file)
+            reader = PdfReader(file)
         except (errors.PdfReadError, AttributeError):
-            _ = decrypt_pdf_document(path)
+            _ = decrypt_pdf_document(path_or_bytes)
             qpdf_called = True
 
         if not qpdf_called:
-            if input_pdf_as_bytes.is_encrypted:
-                is_decrypted = decrypt_pdf_document(path)
+            if reader.is_encrypted:
+                is_decrypted = decrypt_pdf_document(path_or_bytes)
                 if not is_decrypted:
-                    logger.error("pdf document %s cannot be decrypted and therefore cannot be processed further.", path)
+                    logger.error(
+                        LoggingRecord(
+                            f"pdf document {path_or_bytes} cannot be decrypted and therefore cannot "
+                            f"be processed further."
+                        )
+                    )
                     sys.exit()
 
-    file_reader = PdfReader(open(path, "rb"))  # pylint: disable=R1732
-    return file_reader
+    return PdfReader(os.fspath(path_or_bytes))
 
 
 def get_pdf_file_writer() -> PdfWriter:
@@ -118,31 +165,57 @@ class PDFStreamer:
 
     **Example:**
 
-             df = dataflow.DataFromIterable.PDFStreamer(path=path)
+             # Building a Dataflow with a PDFStreamer
+             df = dataflow.DataFromIterable(PDFStreamer(path=path))
              df.reset_state()
 
              for page in df:
                 ... # do whatever you like
 
+             # Something else you can do:
+            streamer = PDFStreamer(path=path)
+            pages = len(streamer)  # get the number of pages
+            random_int = random.sample(range(0, pages), 2) # select some pages
+            for ran in random_int:
+                pdf_bytes = streamer[ran]   # get the page bytes directly
+
+            streamer.close() # Do not forget to close the streamer, otherwise the file will never be closed and might
+                             # cause memory leaks if you open many files.
+
+
     """
 
-    def __init__(self, path: Pathlike) -> None:
+    def __init__(self, path_or_bytes: Union[PathLikeOrStr, bytes]) -> None:
         """
-        :param path: to a pdf.
+        :param path_or_bytes: to a pdf.
         """
-        self.file_reader = get_pdf_file_reader(path)
+        self.file_reader = get_pdf_file_reader(path_or_bytes)
         self.file_writer = PdfWriter()
 
     def __len__(self) -> int:
         return len(self.file_reader.pages)
 
-    def __iter__(self) -> Generator[Tuple[bytes, int], None, None]:
+    def __iter__(self) -> Generator[tuple[bytes, int], None, None]:
         for k in range(len(self)):
             buffer = BytesIO()
             writer = get_pdf_file_writer()
             writer.add_page(self.file_reader.pages[k])
             writer.write(buffer)
             yield buffer.getvalue(), k
+        self.file_reader.close()
+
+    def __getitem__(self, index: int) -> bytes:
+        buffer = BytesIO()
+        writer = get_pdf_file_writer()
+        writer.add_page(self.file_reader.pages[index])
+        writer.write(buffer)
+        return buffer.getvalue()
+
+    def close(self) -> None:
+        """
+        Close the file reader
+        """
+        self.file_reader.close()
 
 
 # The following functions are modified versions from the Python poppler wrapper
@@ -150,16 +223,16 @@ class PDFStreamer:
 
 
 def _input_to_cli_str(
-    input_file_name: Pathlike, output_file_name: Pathlike, dpi: int, size: Optional[Tuple[int, int]] = None
-) -> List[str]:
-    cmd_args: List[str] = []
+    input_file_name: PathLikeOrStr, output_file_name: PathLikeOrStr, dpi: int, size: Optional[tuple[int, int]] = None
+) -> list[str]:
+    cmd_args: list[str] = []
 
     if pdf_to_ppm_available():
         command = "pdftoppm"
     elif pdf_to_cairo_available():
         command = "pdftocairo"
     else:
-        raise PopplerNotFound("Poppler not found. Please install or add to your PATH.")
+        raise DependencyError("Poppler not found. Please install or add to your PATH.")
 
     if platform.system() == "Windows":
         command = command + ".exe"
@@ -189,20 +262,20 @@ class PopplerError(RuntimeError):
         self.args = (status, message)
 
 
-def _run_poppler(poppler_args: List[str]) -> None:
+def _run_poppler(poppler_args: list[str]) -> None:
     try:
         proc = subprocess.Popen(poppler_args)  # pylint: disable=R1732
     except OSError as error:
         if error.errno != ENOENT:
             raise error from error
-        raise PopplerNotFound("Poppler not found. Please install or add to your PATH.") from error
+        raise DependencyError("Poppler not found. Please install or add to your PATH.") from error
 
     with timeout_manager(proc, 0):
         if proc.returncode:
             raise PopplerError(status=proc.returncode, message="Syntax Error: PDF cannot be read with Poppler")
 
 
-def pdf_to_np_array(pdf_bytes: bytes, size: Optional[Tuple[int, int]] = None, dpi: int = 200) -> ImageType:
+def pdf_to_np_array_poppler(pdf_bytes: bytes, size: Optional[tuple[int, int]] = None, dpi: int = 200) -> PixelValues:
     """
     Convert a single pdf page from its byte representation to a numpy array. This function will save the pdf as to a tmp
     file and then call poppler via `pdftoppm` resp. `pdftocairo` if the former is not available.
@@ -218,3 +291,73 @@ def pdf_to_np_array(pdf_bytes: bytes, size: Optional[Tuple[int, int]] = None, dp
         image = viz_handler.read_image(tmp_name + "-1.png")
 
     return image.astype(uint8)
+
+
+def pdf_to_np_array_pdfmium(pdf_bytes: bytes, dpi: int = 200) -> PixelValues:
+    """
+    Convert a single pdf page from its byte representation to a numpy array using pdfium.
+
+    :param pdf_bytes: Bytes representing the PDF file
+    :param dpi:  Image quality in DPI/dots-per-inch (default 200)
+    :return: numpy array
+    """
+
+    page = pypdfium2.PdfDocument(pdf_bytes)[0]
+    return page.render(scale=dpi * 1 / 72).to_numpy().astype(uint8)
+
+
+def pdf_to_np_array(pdf_bytes: bytes, size: Optional[tuple[int, int]] = None, dpi: int = 200) -> PixelValues:
+    """
+    Convert a single pdf page from its byte representation to a numpy array. This function will either use Poppler or
+    pdfium to render the pdf.
+
+    :param pdf_bytes: Bytes representing the PDF file
+    :param size: Size of the resulting image(s), uses (width, height) standard
+    :param dpi:  Image quality in DPI/dots-per-inch (default 200)
+    :return: numpy array
+    """
+    if os.environ.get("USE_DD_PDFIUM", "False") in ENV_VARS_TRUE:
+        if size is not None:
+            logger.warning(
+                LoggingRecord(
+                    f"pdf_to_np_array_pdfmium does not support the size parameter. Will use dpi = {dpi} instead."
+                )
+            )
+        return pdf_to_np_array_pdfmium(pdf_bytes, dpi)
+    return pdf_to_np_array_poppler(pdf_bytes, size, dpi)
+
+
+def split_pdf(
+    pdf_path: PathLikeOrStr, output_dir: PathLikeOrStr, file_type: Literal["image", "pdf"], dpi: int = 200
+) -> None:
+    """
+    Split a pdf into single pages. The pages are saved as single pdf/png files in a subfolder of the output directory.
+
+    :param pdf_path: Path to the pdf file
+    :param output_dir: Path to the output directory
+    :param file_type: Type of the output file. Either "image" or "pdf"
+    :param dpi: Image quality in DPI/dots-per-inch (default
+    """
+    pdf_path = Path(pdf_path)
+    filename = pdf_path.stem
+    output_dir = Path(output_dir)
+    file_dir = output_dir / filename
+    if not file_dir.exists():
+        os.makedirs(file_dir)
+
+    with open(pdf_path, "rb") as file:
+        pdf = PdfReader(file)
+        for i, page in enumerate(pdf.pages):
+            writer = PdfWriter()
+            writer.add_page(page)
+            if file_type == ".pdf":
+                with open(file_dir / f"{filename}_{i}.pdf", "wb") as out:
+                    writer.write(out)
+                    writer.close()
+            else:
+                with BytesIO() as buffer:
+                    writer.write(buffer)
+                    buffer.seek(0)
+                    np_image = pdf_to_np_array(buffer.getvalue(), dpi=dpi)
+                    viz_handler.write_image(file_dir / f"{filename}_{i}.png", np_image)
+                    writer.close()

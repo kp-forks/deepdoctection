@@ -42,6 +42,7 @@ class TestTextExtractionService:
 
         self._text_extract_detector = MagicMock(spec=ObjectDetector)
         self._text_extract_detector.name = "mock_text_extractor"
+        self._text_extract_detector.model_id = "test_model"
         self.text_extraction_service = TextExtractionService(self._text_extract_detector)
 
     @mark.basic
@@ -57,7 +58,7 @@ class TestTextExtractionService:
 
         # Act
         dp = self.text_extraction_service.pass_datapoint(dp_image_fully_segmented_fully_tiled)
-        anns = dp.get_annotation(category_names=LayoutType.word)
+        anns = dp.get_annotation(category_names=LayoutType.WORD)
 
         # Assert
         first_text_ann = anns[0]
@@ -78,6 +79,7 @@ class TestTextExtractionServiceWithPdfPlumberDetector:
 
         self._text_extract_detector = MagicMock(spec=PdfMiner)
         self._text_extract_detector.name = "mock_pdfminer"
+        self._text_extract_detector.model_id = "test_model"
         self.text_extraction_service = TextExtractionService(self._text_extract_detector)
 
     @mark.basic
@@ -95,7 +97,7 @@ class TestTextExtractionServiceWithPdfPlumberDetector:
 
         # Act
         dp = self.text_extraction_service.pass_datapoint(dp_image_fully_segmented_fully_tiled)
-        anns = dp.get_annotation(category_names=LayoutType.word)
+        anns = dp.get_annotation(category_names=LayoutType.WORD)
 
         # Assert
         first_text_ann = anns[0]
@@ -113,10 +115,11 @@ def test_text_extraction_service_raises_error_with_inconsistent_attributes() -> 
     # Arrange
     text_extract_detector = MagicMock(spec=PdfMiner)
     text_extract_detector.name = "mock_pdfminer"
+    text_extract_detector.model_id = "test_model"
 
     # Act and Assert
     with raises(TypeError):
-        TextExtractionService(text_extract_detector, extract_from_roi=LayoutType.table)
+        TextExtractionService(text_extract_detector, extract_from_roi=LayoutType.TABLE)
 
 
 class TestTextExtractionServiceWithSubImage:
@@ -132,8 +135,9 @@ class TestTextExtractionServiceWithSubImage:
 
         self._text_extract_detector = MagicMock(spec=ObjectDetector, accepts_batch=False)
         self._text_extract_detector.name = "mock_text_extractor"
+        self._text_extract_detector.model_id = "test_model"
         self.text_extraction_service = TextExtractionService(
-            self._text_extract_detector, extract_from_roi=LayoutType.table
+            self._text_extract_detector, extract_from_roi=LayoutType.TABLE
         )
 
     @mark.basic
@@ -152,8 +156,8 @@ class TestTextExtractionServiceWithSubImage:
 
         # Act
         dp = self.text_extraction_service.pass_datapoint(dp_image_with_layout_anns)
-        word_anns = dp.get_annotation(category_names=LayoutType.word)
-        table_anns = dp.get_annotation(category_names=LayoutType.table)
+        word_anns = dp.get_annotation(category_names=LayoutType.WORD)
+        table_anns = dp.get_annotation(category_names=LayoutType.TABLE)
 
         assert len(word_anns) == 4
         assert len(table_anns) == 2
@@ -170,8 +174,9 @@ class TestTextExtractionServiceWithSubImage:
         assert global_box_fta == word_box_global[0]
         local_box_fta = first_word_ann.get_bounding_box(first_table_ann.annotation_id)
         assert local_box_fta == first_word_ann.bounding_box
-        ft_text_ann = first_table_ann.image.get_annotation(annotation_ids=  # type: ignore
-                                                           first_word_ann.annotation_id)[0]
+        ft_text_ann = first_table_ann.image.get_annotation(annotation_ids=first_word_ann.annotation_id)[  # type: ignore
+            0
+        ]
 
         assert isinstance(ft_text_ann, ImageAnnotation)
 
@@ -179,8 +184,9 @@ class TestTextExtractionServiceWithSubImage:
         assert global_box_sta == word_box_global[1]
         local_box_sta = second_word_ann.get_bounding_box(first_table_ann.annotation_id)
         assert local_box_sta == second_word_ann.bounding_box
-        ft_text_ann = first_table_ann.image.get_annotation(annotation_ids=  # type: ignore
-                                                           second_word_ann.annotation_id)[0]
+        ft_text_ann = first_table_ann.image.get_annotation(  # type: ignore
+            annotation_ids=second_word_ann.annotation_id
+        )[0]
         assert isinstance(ft_text_ann, ImageAnnotation)
 
         global_box_tta = third_word_ann.get_bounding_box(dp.image_id)

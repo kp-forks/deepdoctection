@@ -25,16 +25,17 @@ import os
 from base64 import b64encode
 from io import BytesIO
 from pathlib import Path
+from shutil import copyfile
 from typing import Callable, Literal, Optional, Protocol, Union, overload
 from urllib.request import urlretrieve
 
-from .detection_types import ImageType, JsonDict, Pathlike
 from .develop import deprecated
-from .logger import logger
+from .logger import LoggingRecord, logger
 from .pdf_utils import get_pdf_file_reader, get_pdf_file_writer
 from .settings import CONFIGS, DATASET_DIR, MODEL_DIR, PATH
 from .tqdm import get_tqdm
-from .utils import FileExtensionError, is_file_extension
+from .types import B64, B64Str, JsonDict, PathLikeOrStr, PixelValues
+from .utils import is_file_extension
 from .viz import viz_handler
 
 __all__ = [
@@ -44,14 +45,13 @@ __all__ = [
     "maybe_path_or_pdf",
     "download",
     "mkdir_p",
-    "is_file_extension",
     "load_json",
-    "FileExtensionError",
     "sub_path",
     "get_package_path",
     "get_configs_dir_path",
     "get_weights_dir_path",
     "get_dataset_dir_path",
+    "maybe_copy_config_to_cache",
 ]
 
 
@@ -68,7 +68,7 @@ def sizeof_fmt(num: float, suffix: str = "B") -> str:
 
 # Copyright (c) Tensorpack Contributors
 # Licensed under the Apache License, Version 2.0 (the "License")
-def mkdir_p(dir_name: Pathlike) -> None:
+def mkdir_p(dir_name: PathLikeOrStr) -> None:
     """
     Like "mkdir -p", make a dir recursively, but do nothing if the dir exists
 
@@ -86,7 +86,9 @@ def mkdir_p(dir_name: Pathlike) -> None:
 
 # Copyright (c) Tensorpack Contributors
 # Licensed under the Apache License, Version 2.0 (the "License")
-def download(url: str, directory: Pathlike, file_name: Optional[str] = None, expect_size: Optional[int] = None) -> str:
+def download(
+    url: str, directory: PathLikeOrStr, file_name: Optional[str] = None, expect_size: Optional[int] = None
+) -> str:
     """
     Download URL to a directory. Will figure out the filename automatically from URL, if not given.
     """
@@ -97,11 +99,11 @@ def download(url: str, directory: Pathlike, file_name: Optional[str] = None, exp
 
     if os.path.isfile(f_path):
         if (expect_size is not None and os.stat(f_path).st_size == expect_size) or expect_size is None:
-            logger.info("File %s exists! Skip download.", file_name)
+            logger.info(LoggingRecord(f"File {file_name} exists! Skip download."))
             return f_path
-        logger.warning("File %s exists. Will overwrite with a new download!", file_name)
+        logger.warning(LoggingRecord(f"File {file_name} exists. Will overwrite with a new download!"))
     else:
-        logger.info("File %s will be downloaded.", file_name)
+        logger.info(LoggingRecord(f"File {file_name} will be downloaded."))
 
     def hook(total):  # type: ignore
         last_b = [0]
@@ -120,29 +122,33 @@ def download(url: str, directory: Pathlike, file_name: Optional[str] = None, exp
         stat_info = os.stat(f_path)
         size = stat_info.st_size
     except IOError:
-        logger.error("Failed to download %s", url)
+        logger.error(LoggingRecord(f"Failed to download {url}"))
         raise
     assert size > 0, f"Downloaded an empty file from {url}!"
 
     if expect_size is not None and size != expect_size:
-        logger.error("File downloaded from %s does not match the expected size!", url)
-        logger.error("You may have downloaded a broken file, or the upstream may have modified the file.")
+        logger.warning(LoggingRecord(f"File downloaded from {url} does not match the expected size!"))
+        logger.warning(
+            LoggingRecord("You may have downloaded a broken file, or the upstream may have modified the file.")
+        )
 
-    logger.info("Successfully downloaded %s. %s.", file_name, sizeof_fmt(size))
+    logger.info(LoggingRecord(f"Successfully downloaded {file_name}. {sizeof_fmt(size)}."))
     return f_path
 
 
 @overload
-def load_image_from_file(path: Pathlike, type_id: Literal["np"] = "np") -> Optional[ImageType]:
+def load_image_from_file(path: PathLikeOrStr, type_id: Literal["np"] = "np") -> Optional[PixelValues]:
     ...
 
 
 @overload
-def load_image_from_file(path: Pathlike, type_id: Literal["b64"]) -> Optional[str]:
+def load_image_from_file(path: PathLikeOrStr, type_id: Literal["b64"]) -> Optional[B64Str]:
     ...
 
 
-def load_image_from_file(path: Pathlike, type_id: Literal["np", "b64"] = "np") -> Optional[Union[str, ImageType]]:
+def load_image_from_file(
+    path: PathLikeOrStr, type_id: Literal["np", "b64"] = "np"
+) -> Optional[Union[B64Str, PixelValues]]:
     """
     Loads an image from path and passes back an encoded base64 string, a numpy array or None if file is not found
     or a conversion error occurs.
@@ -151,7 +157,7 @@ def load_image_from_file(path: Pathlike, type_id: Literal["np", "b64"] = "np") -
     :param type_id:  "np" or "b64".
     :return: image of desired representation
     """
-    image: Optional[Union[str, ImageType]] = None
+    image: Optional[Union[str, PixelValues]] = None
     path = path.as_posix() if isinstance(path, Path) else path
 
     assert is_file_extension(path, [".png", ".jpeg", ".jpg", ".tif"]), f"image type not allowed: {path}"
@@ -164,12 +170,12 @@ def load_image_from_file(path: Pathlike, type_id: Literal["np", "b64"] = "np") -
         else:
             image = viz_handler.read_image(path)
     except (FileNotFoundError, ValueError):
-        logger.info("file not found or value error: %s", path)
+        logger.info(LoggingRecord(f"file not found or value error: {path}"))
 
     return image
 
 
-def load_bytes_from_pdf_file(path: Pathlike, page_number: int = 0) -> bytes:
+def load_bytes_from_pdf_file(path: PathLikeOrStr, page_number: int = 0) -> B64:
     """
     Loads a pdf file with one single page and passes back a bytes' representation of this file. Can be converted into
     a numpy or directly passed to the attr: image of Image.
@@ -194,13 +200,13 @@ class LoadImageFunc(Protocol):
     Protocol for typing load_image_from_file
     """
 
-    def __call__(self, path: Pathlike) -> Optional[ImageType]:
+    def __call__(self, path: PathLikeOrStr) -> Optional[PixelValues]:
         ...
 
 
 def get_load_image_func(
-    path: Pathlike,
-) -> Union[LoadImageFunc, Callable[[Pathlike], bytes]]:
+    path: PathLikeOrStr,
+) -> Union[LoadImageFunc, Callable[[PathLikeOrStr], B64]]:
     """
     Return the loading function according to its file extension.
 
@@ -208,35 +214,38 @@ def get_load_image_func(
     :return: The function loading the file (and converting to its desired format)
     """
 
-    assert is_file_extension(path, [".png", ".jpeg", ".jpg", ".pdf", ".tif"]), f"image type not allowed: {path}"
+    assert is_file_extension(path, [".png", ".jpeg", ".jpg", ".pdf", ".tif"]), f"image type not allowed: " f"{path}"
 
     if is_file_extension(path, [".png", ".jpeg", ".jpg", ".tif"]):
         return load_image_from_file
     if is_file_extension(path, [".pdf"]):
         return load_bytes_from_pdf_file
-    return NotImplemented
+    raise NotImplementedError(
+        "File extension not supported by any loader. Please specify a file type and raise an issue"
+    )
 
 
-def maybe_path_or_pdf(path: Pathlike) -> int:
+def maybe_path_or_pdf(path: PathLikeOrStr) -> int:
     """
-    Checks if the path points to a directory or a pdf document. Returns 1 if the path points to a directory, 2
-    if the path points to a pdf doc or 0, if none of the previous is true.
+    Checks if the path points to a directory, a pdf document or a single image. Returns 1 if the path points to a
+    directory, 2 if the path points to a pdf doc and 3 if path points to either a PNG, JPG or JPEG or 0 if none of the
+    previous is true.
 
     :param path: A path
-    :return: A value of 0,1,2
+    :return: A value of 0,1,2,3
     """
 
-    is_dir = os.path.isdir(path)
-    if is_dir:
+    if os.path.isdir(path):
         return 1
     file_name = os.path.split(path)[1]
-    is_pdf = is_file_extension(file_name, ".pdf")
-    if is_pdf:
+    if is_file_extension(file_name, ".pdf"):
         return 2
+    if is_file_extension(file_name, [".png", ".jpeg", ".jpg", ".tif"]):
+        return 3
     return 0
 
 
-def load_json(path_ann: Pathlike) -> JsonDict:
+def load_json(path_ann: PathLikeOrStr) -> JsonDict:
     """
     Loading json file
 
@@ -276,8 +285,29 @@ def get_dataset_dir_path() -> Path:
     return DATASET_DIR
 
 
+def maybe_copy_config_to_cache(
+    package_path: PathLikeOrStr, configs_dir_path: PathLikeOrStr, file_name: str, force_copy: bool = True
+) -> str:
+    """
+    Initial copying of various files
+    :param package_path: base path to directory of source file `file_name`
+    :param configs_dir_path: base path to target directory
+    :param file_name: file to copy
+    :param force_copy: If file is already in target directory, will re-copy the file
+
+    :return: path to the copied file_name
+    """
+
+    absolute_path_source = os.path.join(package_path, file_name)
+    absolute_path = os.path.join(configs_dir_path, os.path.join(os.path.split(file_name)[1]))
+    mkdir_p(os.path.split(absolute_path)[0])
+    if not os.path.isfile(absolute_path) or force_copy:
+        copyfile(absolute_path_source, absolute_path)
+    return absolute_path
+
+
 @deprecated("Use pathlib operations instead", "2022-06-08")
-def sub_path(anchor_dir: str, *paths: str) -> str:
+def sub_path(anchor_dir: PathLikeOrStr, *paths: PathLikeOrStr) -> PathLikeOrStr:
     """
     Generate a path from the anchor directory and various paths args.
 

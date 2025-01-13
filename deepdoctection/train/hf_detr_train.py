@@ -19,20 +19,13 @@
 Module for training Hugging Face Detr implementation. Note, that this scripts only trans Tabletransformer like Detr
 models that are a slightly different from the plain Detr model that are provided by the transformer library.
 """
+from __future__ import annotations
 
 import copy
-from typing import Any, Dict, List, Optional, Sequence, Type, Union
+import os
+from typing import Any, Optional, Sequence, Type, Union
 
-from torch.nn import Module
-from torch.utils.data import Dataset
-from transformers import (
-    AutoFeatureExtractor,
-    IntervalStrategy,
-    PretrainedConfig,
-    PreTrainedModel,
-    TableTransformerForObjectDetection,
-)
-from transformers.trainer import Trainer, TrainingArguments
+from lazy_imports import try_import
 
 from ..datasets.adapter import DatasetAdapter
 from ..datasets.base import DatasetBase
@@ -42,10 +35,26 @@ from ..eval.eval import Evaluator
 from ..eval.registry import metric_registry
 from ..extern.hfdetr import HFDetrDerivedDetector
 from ..mapper.hfstruct import DetrDataCollator, image_to_hf_detr_training
-from ..pipe.base import PredictorPipelineComponent
+from ..pipe.base import PipelineComponent
 from ..pipe.registry import pipeline_component_registry
-from ..utils.logger import logger
+from ..utils.logger import LoggingRecord, logger
+from ..utils.types import PathLikeOrStr
 from ..utils.utils import string_to_dict
+
+with try_import() as pt_import_guard:
+    from torch import nn
+    from torch.utils.data import Dataset
+
+with try_import() as hf_import_guard:
+    from transformers import (
+        AutoFeatureExtractor,
+        IntervalStrategy,
+        PretrainedConfig,
+        PreTrainedModel,
+        TableTransformerForObjectDetection,
+        Trainer,
+        TrainingArguments,
+    )
 
 
 class DetrDerivedTrainer(Trainer):
@@ -61,19 +70,19 @@ class DetrDerivedTrainer(Trainer):
 
     def __init__(
         self,
-        model: Union[PreTrainedModel, Module],
+        model: Union[PreTrainedModel, nn.Module],
         args: TrainingArguments,
         data_collator: DetrDataCollator,
         train_dataset: Dataset[Any],
     ):
         self.evaluator: Optional[Evaluator] = None
-        self.build_eval_kwargs: Optional[Dict[str, Any]] = None
+        self.build_eval_kwargs: Optional[dict[str, Any]] = None
         super().__init__(model, args, data_collator, train_dataset)
 
     def setup_evaluator(
         self,
         dataset_val: DatasetBase,
-        pipeline_component: PredictorPipelineComponent,
+        pipeline_component: PipelineComponent,
         metric: Union[Type[MetricBase], MetricBase],
         **build_eval_kwargs: Union[str, int],
     ) -> None:
@@ -90,17 +99,15 @@ class DetrDerivedTrainer(Trainer):
         self.evaluator = Evaluator(dataset_val, pipeline_component, metric, num_threads=1)
         assert self.evaluator.pipe_component
         for comp in self.evaluator.pipe_component.pipe_components:
-            assert isinstance(comp, PredictorPipelineComponent)
-            assert isinstance(comp.predictor, HFDetrDerivedDetector)
-            comp.predictor.hf_detr_predictor = None
+            comp.clear_predictor()
         self.build_eval_kwargs = build_eval_kwargs
 
     def evaluate(
         self,
-        eval_dataset: Optional[Dataset[Any]] = None,
-        ignore_keys: Optional[List[str]] = None,
-        metric_key_prefix: str = "eval",
-    ) -> Dict[str, float]:
+        eval_dataset: Optional[Dataset[Any]] = None,  # pylint: disable=W0613
+        ignore_keys: Optional[list[str]] = None,  # pylint: disable=W0613
+        metric_key_prefix: str = "eval",  # pylint: disable=W0613
+    ) -> dict[str, float]:
         """
         Overwritten method from `Trainer`. Arguments will not be used.
         """
@@ -122,12 +129,12 @@ class DetrDerivedTrainer(Trainer):
 
 
 def train_hf_detr(
-    path_config_json: str,
+    path_config_json: PathLikeOrStr,
     dataset_train: Union[str, DatasetBase],
-    path_weights: str,
+    path_weights: PathLikeOrStr,
     path_feature_extractor_config_json: str,
-    config_overwrite: Optional[List[str]] = None,
-    log_dir: str = "train_log/detr",
+    config_overwrite: Optional[list[str]] = None,
+    log_dir: PathLikeOrStr = "train_log/detr",
     build_train_config: Optional[Sequence[str]] = None,
     dataset_val: Optional[DatasetBase] = None,
     build_val_config: Optional[Sequence[str]] = None,
@@ -162,13 +169,13 @@ def train_hf_detr(
     :param pipeline_component_name: A pipeline component name to use for validation
     """
 
-    build_train_dict: Dict[str, str] = {}
+    build_train_dict: dict[str, str] = {}
     if build_train_config is not None:
         build_train_dict = string_to_dict(",".join(build_train_config))
     if "split" not in build_train_dict:
         build_train_dict["split"] = "train"
 
-    build_val_dict: Dict[str, str] = {}
+    build_val_dict: dict[str, str] = {}
     if build_val_config is not None:
         build_val_dict = string_to_dict(",".join(build_val_config))
     if "split" not in build_val_dict:
@@ -184,18 +191,25 @@ def train_hf_detr(
     categories_dict_name_as_key = dataset_train.dataflow.categories.get_categories(name_as_key=True, filtered=True)
 
     dataset = DatasetAdapter(
-        dataset_train, True, image_to_hf_detr_training(category_names=categories), True, **build_train_dict
+        dataset_train,
+        True,
+        image_to_hf_detr_training(category_names=categories),
+        True,
+        number_repetitions=-1,
+        **build_train_dict,
     )
 
     number_samples = len(dataset)
     conf_dict = {
-        "output_dir": log_dir,
+        "output_dir": os.fspath(log_dir),
         "remove_unused_columns": False,
         "per_device_train_batch_size": 2,
         "max_steps": number_samples,
-        "evaluation_strategy": "steps"
-        if (dataset_val is not None and metric is not None and pipeline_component_name is not None)
-        else "no",
+        "evaluation_strategy": (
+            "steps"
+            if (dataset_val is not None and metric is not None and pipeline_component_name is not None)
+            else "no"
+        ),
         "eval_steps": 5000,
     }
 
@@ -213,11 +227,13 @@ def train_hf_detr(
     # Will inform about dataloader warnings if max_steps exceeds length of dataset
     if conf_dict["max_steps"] > number_samples:  # type: ignore
         logger.warning(
-            "After %s dataloader will log warning at every iteration about unexpected samples", number_samples
+            LoggingRecord(
+                f"After {number_samples} dataloader will log warning at every iteration " f"about unexpected samples"
+            )
         )
 
     arguments = TrainingArguments(**conf_dict)
-    logger.info("Config: \n %s", str(arguments.to_dict()), arguments.to_dict())
+    logger.info(LoggingRecord(f"Config: \n {arguments.to_dict()}", arguments.to_dict()))
 
     id2label = {int(k) - 1: v for v, k in categories_dict_name_as_key.items()}
     config = PretrainedConfig.from_pretrained(
@@ -245,7 +261,6 @@ def train_hf_detr(
         )
         pipeline_component_cls = pipeline_component_registry.get(pipeline_component_name)
         pipeline_component = pipeline_component_cls(detector)
-        assert isinstance(pipeline_component, PredictorPipelineComponent)
 
         if metric_name is not None:
             metric = metric_registry.get(metric_name)

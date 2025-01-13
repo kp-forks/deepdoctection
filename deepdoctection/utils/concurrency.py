@@ -28,8 +28,8 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Generator, Optional, no_type_check
 
-from .detection_types import QueueType
 from .logger import log_once
+from .types import QueueType
 
 
 # taken from https://github.com/tensorpack/dataflow/blob/master/dataflow/utils/concurrency.py
@@ -109,7 +109,7 @@ def enable_death_signal(_warn: bool = True) -> None:
         prctl, "set_pdeathsig"
     ), "prctl.set_pdeathsig does not exist! Note that you need to install 'python-prctl' instead of 'prctl'."
     # is SIGHUP a good choice?
-    prctl.set_pdeathsig(signal.SIGHUP)
+    prctl.set_pdeathsig(signal.SIGHUP)  # pylint: disable=E1101
 
 
 # taken from https://github.com/tensorpack/dataflow/blob/master/dataflow/utils/concurrency.py

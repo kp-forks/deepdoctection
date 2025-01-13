@@ -18,20 +18,24 @@
 """
 Module for the base class of datasets.
 """
+from __future__ import annotations
 
+import json
 import os
 import pprint
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Type, Union
+from inspect import signature
+from pathlib import Path
+from typing import Any, Mapping, Optional, Sequence, Type, Union
 
 import numpy as np
 
 from ..dataflow import CacheData, ConcatData, CustomDataFromList, DataFlow
-from ..datapoint import Image
-from ..utils.detection_types import Pathlike
-from ..utils.logger import logger
-from ..utils.settings import ObjectTypes, TypeOrStr, get_type
+from ..datapoint.image import Image
+from ..utils.logger import LoggingRecord, logger
+from ..utils.settings import DatasetType, ObjectTypes, TypeOrStr, get_type
+from ..utils.types import PathLikeOrStr
 from .dataflow_builder import DataFlowBaseBuilder
 from .info import DatasetCategories, DatasetInfo, get_merged_categories
 
@@ -51,9 +55,11 @@ class DatasetBase(ABC):
         self._dataflow_builder.splits = self._dataset_info.splits
 
         if not self.dataset_available() and self.is_built_in():
-            print(
-                f"Dataset {self._dataset_info.name} not locally found. Please download at {self._dataset_info.url}"
-                f" and place under {self._dataflow_builder.get_workdir()}"
+            logger.warning(
+                LoggingRecord(
+                    f"Dataset {self._dataset_info.name} not locally found. Please download at {self._dataset_info.url}"
+                    f" and place under {self._dataflow_builder.get_workdir()}"
+                )
             )
 
     @property
@@ -76,7 +82,7 @@ class DatasetBase(ABC):
         Construct the DatasetCategory object.
         """
 
-        raise NotImplementedError
+        raise NotImplementedError()
 
     @classmethod
     @abstractmethod
@@ -85,7 +91,7 @@ class DatasetBase(ABC):
         Construct the DatasetInfo object.
         """
 
-        raise NotImplementedError
+        raise NotImplementedError()
 
     @abstractmethod
     def _builder(self) -> DataFlowBaseBuilder:
@@ -93,7 +99,7 @@ class DatasetBase(ABC):
         Construct the DataFlowBaseBuilder object. It needs to be implemented in the derived class.
         """
 
-        raise NotImplementedError
+        raise NotImplementedError()
 
     def dataset_available(self) -> bool:
         """
@@ -114,7 +120,7 @@ class DatasetBase(ABC):
 
 class _BuiltInDataset(DatasetBase, ABC):
     """
-    Dataclass for built-in dataset. Do not use this it
+    Dataclass for built-in dataset. Do not use this
     """
 
     _name: Optional[str] = None
@@ -132,14 +138,14 @@ class SplitDataFlow(DataFlowBaseBuilder):
     Dataflow builder for splitting datasets
     """
 
-    def __init__(self, train: List[Image], val: List[Image], test: Optional[List[Image]]):
+    def __init__(self, train: list[Image], val: list[Image], test: Optional[list[Image]]):
         """
         :param train: Cached train split
         :param val: Cached val split
         :param test: Cached test split
         """
         super().__init__(location="")
-        self.split_cache: Dict[str, List[Image]]
+        self.split_cache: dict[str, list[Image]]
         if test is None:
             self.split_cache = {"train": train, "val": val}
         else:
@@ -209,8 +215,8 @@ class MergeDataset(DatasetBase):
         :param datasets: An arbitrary number of datasets
         """
         self.datasets = datasets
-        self.dataflows: Optional[Tuple[DataFlow, ...]] = None
-        self.datapoint_list: Optional[List[Image]] = None
+        self.dataflows: Optional[tuple[DataFlow, ...]] = None
+        self.datapoint_list: Optional[list[Image]] = None
         super().__init__()
         self._dataset_info.type = datasets[0].dataset_info.type
         self._dataset_info.name = "merge_" + "_".join([dataset.dataset_info.name for dataset in self.datasets])
@@ -233,7 +239,7 @@ class MergeDataset(DatasetBase):
             def __init__(self, *dataflow_builders: DataFlowBaseBuilder):
                 super().__init__("")
                 self.dataflow_builders = dataflow_builders
-                self.dataflows: Optional[Tuple[DataFlow, ...]] = None
+                self.dataflows: Optional[tuple[DataFlow, ...]] = None
 
             def build(self, **kwargs: Union[str, int]) -> DataFlow:
                 """
@@ -247,10 +253,10 @@ class MergeDataset(DatasetBase):
                 """
                 df_list = []
                 if self.dataflows is not None:
-                    logger.info("Will used dataflow from previously explicitly passed configuration")
+                    logger.info(LoggingRecord("Will used dataflow from previously explicitly passed configuration"))
                     return ConcatData(list(self.dataflows))
 
-                logger.info("Will use the same build setting for all dataflows")
+                logger.info(LoggingRecord("Will use the same build setting for all dataflows"))
                 for dataflow_builder in self.dataflow_builders:
                     df_list.append(dataflow_builder.build(**kwargs))
                 df = ConcatData(df_list)
@@ -305,7 +311,7 @@ class MergeDataset(DatasetBase):
             test_dataset = [dp for id, dp in enumerate(val_dataset) if id % 2]
             val_dataset = [dp for id, dp in enumerate(val_dataset) if not id % 2]
 
-        logger.info("___________________ Number of datapoints per split ___________________")
+        logger.info(LoggingRecord("___________________ Number of datapoints per split ___________________"))
         logger.info(
             pprint.pformat(
                 {
@@ -321,7 +327,7 @@ class MergeDataset(DatasetBase):
         self._dataflow_builder = SplitDataFlow(train_dataset, val_dataset, test_dataset)
         self._dataflow_builder.categories = self._categories()
 
-    def get_ids_by_split(self) -> Dict[str, List[str]]:
+    def get_ids_by_split(self) -> dict[str, list[str]]:
         """
         To reproduce a dataset split at a later stage, get a summary of the by having a dict of list with split and
         the image ids contained in the split.
@@ -383,7 +389,7 @@ class CustomDataset(DatasetBase):
         self,
         name: str,
         dataset_type: TypeOrStr,
-        location: Pathlike,
+        location: PathLikeOrStr,
         init_categories: Sequence[ObjectTypes],
         dataflow_builder: Type[DataFlowBaseBuilder],
         init_sub_categories: Optional[Mapping[ObjectTypes, Mapping[ObjectTypes, Sequence[ObjectTypes]]]] = None,
@@ -419,7 +425,7 @@ class CustomDataset(DatasetBase):
         """
 
         self.name = name
-        self.type = get_type(dataset_type)
+        self.type: DatasetType = get_type(dataset_type)  # type: ignore
         self.location = location
         self.init_categories = init_categories
         if init_sub_categories is None:
@@ -427,6 +433,11 @@ class CustomDataset(DatasetBase):
         else:
             self.init_sub_categories = init_sub_categories
         self.annotation_files = annotation_files
+        if signature(dataflow_builder.__init__).parameters.keys() != {"self", "location", "annotation_files"}:
+            raise TypeError(
+                "Dataflow builder must have the signature `def __init__(self, location: Pathlike, "
+                "annotation_files: Optional[Mapping[str, Union[str, Sequence[str]]]] = None):`"
+            )
         self.dataflow_builder = dataflow_builder(self.location, self.annotation_files)
         super().__init__()
 
@@ -438,3 +449,67 @@ class CustomDataset(DatasetBase):
 
     def _builder(self) -> DataFlowBaseBuilder:
         return self.dataflow_builder
+
+    @staticmethod
+    def from_dataset_card(file_path: PathLikeOrStr, dataflow_builder: Type[DataFlowBaseBuilder]) -> CustomDataset:
+        """
+        This static method creates a CustomDataset instance from a dataset card.
+
+        A dataset card is a JSON file that contains metadata about the dataset such as its name, type, location,
+        initial categories, initial sub categories, and annotation files. The dataflow_builder parameter is a class
+        that inherits from DataFlowBaseBuilder and is used to build the dataflow for the dataset.
+
+        :param file_path: The path to the dataset card (JSON file).
+        :param dataflow_builder: The class used to build the dataflow for the dataset.
+        :return: A CustomDataset instance created from the dataset card.
+        """
+
+        with open(file_path, "r", encoding="UTF-8") as file:
+            meta_data = json.load(file)
+        meta_data["dataset_type"] = get_type(meta_data["dataset_type"])
+        meta_data["location"] = Path(meta_data["location"])
+        meta_data["init_categories"] = [get_type(cat) for cat in meta_data["init_categories"]]
+        meta_data["init_sub_categories"] = (
+            {
+                get_type(cat): {
+                    get_type(sub_cat_key): [get_type(sub_cat_value) for sub_cat_value in sub_cat_values]
+                    for sub_cat_key, sub_cat_values in sub_cats.items()
+                }
+                for cat, sub_cats in meta_data["init_sub_categories"].items()
+            }
+            if meta_data["init_sub_categories"] is not None
+            else None
+        )
+        return CustomDataset(**meta_data, dataflow_builder=dataflow_builder)
+
+    def as_dict(self) -> Mapping[str, Any]:
+        """
+        Return the meta-data of the dataset as a dictionary.
+
+        :return: A dictionary containing the meta-data of the dataset.
+        """
+        return {
+            "name": self.name,
+            "dataset_type": self.type,
+            "location": str(self.location),
+            "annotation_files": self.annotation_files,
+            "init_categories": [cat.value for cat in self.init_categories],
+            "init_sub_categories": {
+                cat.value: {
+                    sub_cat_key.value: [sub_cat_value.value for sub_cat_value in sub_cat_values]
+                    for sub_cat_key, sub_cat_values in sub_cats.items()
+                }
+                for cat, sub_cats in self.init_sub_categories.items()
+            }
+            if self.init_sub_categories is not None
+            else None,
+        }
+
+    def save_dataset_card(self, file_path: str) -> None:
+        """
+        Save the dataset card to a JSON file.
+
+        :param file_path: file_path
+        """
+        with open(file_path, "w", encoding="UTF-8") as file:
+            json.dump(self.as_dict(), file, indent=4)

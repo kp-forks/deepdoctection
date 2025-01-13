@@ -41,37 +41,37 @@ def test_page_from_image(dp_image_with_layout_and_word_annotations: Image) -> No
     dp_image = dp_image_with_layout_and_word_annotations
     title_ann = dp_image.get_annotation(category_names=["title"])[0]
     title_ann.dump_sub_category(
-        Relationships.reading_order, CategoryAnnotation(category_name=Relationships.reading_order, category_id="1")
+        Relationships.READING_ORDER, CategoryAnnotation(category_name=Relationships.READING_ORDER, category_id=1)
     )
     text_ann = dp_image.get_annotation(category_names=["text"])[0]
     text_ann.dump_sub_category(
-        Relationships.reading_order, CategoryAnnotation(category_name=Relationships.reading_order, category_id="2")
+        Relationships.READING_ORDER, CategoryAnnotation(category_name=Relationships.READING_ORDER, category_id=2)
     )
 
     word_anns = dp_image.get_annotation(category_names="word")
 
     word_anns[0].dump_sub_category(
-        Relationships.reading_order, CategoryAnnotation(category_name=Relationships.reading_order, category_id="1")
+        Relationships.READING_ORDER, CategoryAnnotation(category_name=Relationships.READING_ORDER, category_id=1)
     )
     word_anns[1].dump_sub_category(
-        Relationships.reading_order, CategoryAnnotation(category_name=Relationships.reading_order, category_id="2")
+        Relationships.READING_ORDER, CategoryAnnotation(category_name=Relationships.READING_ORDER, category_id=2)
     )
     word_anns[2].dump_sub_category(
-        Relationships.reading_order, CategoryAnnotation(category_name=Relationships.reading_order, category_id="1")
+        Relationships.READING_ORDER, CategoryAnnotation(category_name=Relationships.READING_ORDER, category_id=1)
     )
     word_anns[3].dump_sub_category(
-        Relationships.reading_order, CategoryAnnotation(category_name=Relationships.reading_order, category_id="2")
+        Relationships.READING_ORDER, CategoryAnnotation(category_name=Relationships.READING_ORDER, category_id=2)
     )
 
     # Act
     page = Page.from_image(
         dp_image,
-        LayoutType.word,
-        [LayoutType.text, LayoutType.title, LayoutType.list],
+        LayoutType.WORD,
+        [LayoutType.TEXT, LayoutType.TITLE, LayoutType.LIST],
     )
 
     # Assert
-    assert page.text == "hello world\nbye world\n"
+    assert page.text == "hello world\nbye world"
 
 
 @mark.basic
@@ -90,7 +90,7 @@ def test_image_with_anns_can_be_saved(image: WhiteImage) -> None:
     test_image.dump(cat_1)
 
     # Act
-    page = Page.from_image(test_image, LayoutType.table, [LayoutType.table])
+    page = Page.from_image(test_image, LayoutType.TABLE, [LayoutType.TABLE])
 
     try:
         page.save(dry=True)
@@ -106,3 +106,45 @@ def test_load_page_from_file() -> None:
     test_file_path = get_test_path() / "test_image.json"
     image = Page.from_file(test_file_path.as_posix())
     assert isinstance(image, Page)
+
+
+@mark.basic
+def test_get_layout_context() -> None:
+    """
+    test get_layout_context with various context sizes
+    """
+
+    # Arrange
+    test_file_path = get_test_path() / "FRFPE" / "7406fd39ef9ab74660be111dca703065_0.json"
+    page = Page.from_file(test_file_path.as_posix())
+    ann_id = "41c5cb4b-f7b2-3c7c-93de-b2556d560de9"
+
+    # Act
+    out = page.get_layout_context(ann_id, 0)
+
+    # Assert
+    assert len(out) == 1
+    assert out[0].annotation_id == ann_id
+
+    # Act
+    out = page.get_layout_context(ann_id, 1)
+
+    # Assert
+    assert len(out) == 3
+    assert [ann.annotation_id for ann in out] == [
+        "84a540e8-0d37-3aeb-9905-af2870c7b514",
+        "41c5cb4b-f7b2-3c7c-93de-b2556d560de9",
+        "e8785459-890e-3a97-823b-f07aa5eff5a2",
+    ]
+
+    # Act
+    out = page.get_layout_context(ann_id, 2)
+
+    # Assert
+    assert len(out) == 4
+    assert [ann.annotation_id for ann in out] == [
+        "b45b3c5f-9c8e-35a1-bf5c-daaeb271ef38",
+        "84a540e8-0d37-3aeb-9905-af2870c7b514",
+        "41c5cb4b-f7b2-3c7c-93de-b2556d560de9",
+        "e8785459-890e-3a97-823b-f07aa5eff5a2",
+    ]

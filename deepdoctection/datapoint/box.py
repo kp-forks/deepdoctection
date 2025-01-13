@@ -21,17 +21,19 @@ Implementation of BoundingBox class and related methods
 
 from dataclasses import dataclass
 from math import ceil, floor
-from typing import List, Optional, Sequence, no_type_check
+from typing import Optional, Sequence, no_type_check
 
 import numpy as np
 import numpy.typing as npt
+from lazy_imports import try_import
 from numpy import float32
 
-from ..utils.detection_types import ImageType
+from ..utils.error import BoundingBoxError
 from ..utils.file_utils import cocotools_available
-from ..utils.logger import logger
+from ..utils.logger import LoggingRecord, logger
+from ..utils.types import PixelValues
 
-if cocotools_available():
+with try_import() as import_guard:
     import pycocotools.mask as coco_mask
 
 
@@ -140,10 +142,6 @@ def iou(boxes1: npt.NDArray[float32], boxes2: npt.NDArray[float32]) -> npt.NDArr
     return np_iou(boxes1, boxes2)
 
 
-class BoundingBoxError(BaseException):
-    """Special exception only for `BoundingBox`"""
-
-
 @dataclass
 class BoundingBox:
     """
@@ -223,7 +221,7 @@ class BoundingBox:
         return self.uly + 0.5 * self.height
 
     @property
-    def center(self) -> List[float]:
+    def center(self) -> list[float]:
         """
         Bounding box center [x,y]
         """
@@ -266,7 +264,7 @@ class BoundingBox:
             * np_poly_scale
         )
 
-    def to_list(self, mode: str, scale_x: float = 1.0, scale_y: float = 1.0) -> List[float]:
+    def to_list(self, mode: str, scale_x: float = 1.0, scale_y: float = 1.0) -> list[float]:
         """
         Returns the coordinates as list
 
@@ -347,7 +345,7 @@ class BoundingBox:
         return f"Bounding Box ulx: {self.ulx}, uly: {self.uly}, lrx: {self.lrx}, lry: {self.lry}"
 
     @staticmethod
-    def remove_keys() -> List[str]:
+    def remove_keys() -> list[str]:
         """
         A list of attributes to suspend from as_dict creation.
         """
@@ -400,8 +398,8 @@ def intersection_box(
 
 
 def crop_box_from_image(
-    np_image: ImageType, crop_box: BoundingBox, width: Optional[float] = None, height: Optional[float] = None
-) -> ImageType:
+    np_image: PixelValues, crop_box: BoundingBox, width: Optional[float] = None, height: Optional[float] = None
+) -> PixelValues:
     """
     Crop a box (the crop_box) from a np_image. Will floor the left  and ceil the right coordinate point.
 
@@ -493,10 +491,8 @@ def global_to_local_coords(global_box: BoundingBox, embedding_box: BoundingBox) 
 
 def merge_boxes(*boxes: BoundingBox) -> BoundingBox:
     """
-    Generating the smallest box containing an arbitrary tuple/list of boxes. This function is only implemented for boxes
-    with absolute coords = "True".
-
-    :param boxes: An arbitrary tuple/list of bounding boxes `BoundingBox` all having absolute_coords="True".
+    Generating the smallest box containing an arbitrary tuple/list of boxes.
+    :param boxes: An arbitrary tuple/list of bounding boxes `BoundingBox`.
     """
     absolute_coords = boxes[0].absolute_coords
     assert all(box.absolute_coords == absolute_coords for box in boxes), "all boxes must have same absolute_coords"
@@ -558,7 +554,13 @@ def intersection_boxes(boxes_1: Sequence[BoundingBox], boxes_2: Sequence[Boundin
     :param boxes_2: sequence of n BoundingBox
     :return: list of at most mxn BoundingBox
     """
-    if boxes_1[0].absolute_coords != boxes_1[0].absolute_coords:
+    if not boxes_1 and boxes_2:
+        return boxes_2
+    if not boxes_2 and boxes_1:
+        return boxes_1
+    if not boxes_1 and not boxes_2:
+        return []
+    if boxes_1[0].absolute_coords != boxes_2[0].absolute_coords:
         raise ValueError("absolute_coords of boxes_1 and boxes_2 mus be equal")
     absolute_coords = boxes_1[0].absolute_coords
     boxes1 = np.array([box.to_list(mode="xyxy") for box in boxes_1])
@@ -596,6 +598,6 @@ def intersection_boxes(boxes_1: Sequence[BoundingBox], boxes_2: Sequence[Boundin
                 "height": np_boxes_output[idx][3],
             }
 
-            logger.warning("intersection_boxes error %s", "", log_dict)
+            logger.warning(LoggingRecord("intersection_boxes", log_dict))  # type: ignore
 
     return boxes_output

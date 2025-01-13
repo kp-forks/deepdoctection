@@ -16,14 +16,15 @@ import sys
 from os import environ, path
 from shutil import which
 from types import ModuleType
-from typing import Any, Tuple, Union, no_type_check
+from typing import Any, Union, no_type_check
 
 import importlib_metadata
 from packaging import version
 
-from .detection_types import Requirement
-from .logger import logger
+from .error import DependencyError
+from .logger import LoggingRecord, logger
 from .metacfg import AttrDict
+from .types import PathLikeOrStr, Requirement
 
 _GENERIC_ERR_MSG = "Please check the required version either in the docs or in the setup file"
 
@@ -51,7 +52,7 @@ def get_tf_version() -> str:
     """
     tf_version = "0.0"
     if tf_available():
-        candidates: Tuple[str, ...] = (
+        candidates: tuple[str, ...] = (
             "tensorflow",
             "tensorflow-cpu",
             "tensorflow-gpu",
@@ -249,31 +250,26 @@ def get_detectron2_requirement() -> Requirement:
 # Tesseract related dependencies
 _TESS_AVAILABLE = which("tesseract") is not None
 # Tesseract installation path
-_TESS_PATH = "tesseract"
+_TESS_PATH: PathLikeOrStr = "tesseract"
 _TESS_ERR_MSG = (
     "Tesseract >=4.0 must be installed. Please follow the official installation instructions. "
     "https://tesseract-ocr.github.io/tessdoc/Installation.html"
 )
 
 
-def set_tesseract_path(tesseract_path: str) -> None:
+def set_tesseract_path(tesseract_path: PathLikeOrStr) -> None:
     """Set the Tesseract path. If you have tesseract installed in Anaconda,
        you can use this function to set tesseract path.
 
     :param tesseract_path: Tesseract installation path.
     """
-    if tesseract_path is None:
-        raise ValueError("tesseract_path is empty.")
 
     global _TESS_AVAILABLE  # pylint: disable=W0603
     global _TESS_PATH  # pylint: disable=W0603
 
     tesseract_flag = which(tesseract_path)
 
-    if tesseract_flag is None:
-        _TESS_AVAILABLE = False
-    else:
-        _TESS_AVAILABLE = True
+    _TESS_AVAILABLE = False if tesseract_flag is not None else True  # pylint: disable=W0603,R1719
 
     _TESS_PATH = tesseract_path
 
@@ -288,12 +284,6 @@ def tesseract_available() -> bool:
 # copy paste from https://github.com/madmaze/pytesseract/blob/master/pytesseract/pytesseract.py
 
 
-class TesseractNotFound(BaseException):
-    """
-    Exception class for Tesseract being not found
-    """
-
-
 def get_tesseract_version() -> Union[int, version.Version]:
     """
     Returns Version object of the Tesseract version. We need at least Tesseract 3.05
@@ -306,7 +296,7 @@ def get_tesseract_version() -> Union[int, version.Version]:
             stdin=subprocess.DEVNULL,
         )
     except OSError:
-        raise TesseractNotFound(_TESS_ERR_MSG) from OSError
+        raise DependencyError(_TESS_ERR_MSG) from OSError
 
     raw_version = output.decode("utf-8")
     str_version, *_ = raw_version.lstrip(string.printable[10:]).partition(" ")
@@ -348,12 +338,6 @@ def pdf_to_cairo_available() -> bool:
     return bool(_PDF_TO_CAIRO_AVAILABLE)
 
 
-class PopplerNotFound(BaseException):
-    """
-    Exception class for Poppler being not found
-    """
-
-
 def get_poppler_version() -> Union[int, version.Version]:
     """
     Returns Version object of the Poppler version. We need at least Tesseract 3.05
@@ -371,7 +355,7 @@ def get_poppler_version() -> Union[int, version.Version]:
             [command, "-v"], stderr=subprocess.STDOUT, env=environ, stdin=subprocess.DEVNULL
         )
     except OSError:
-        raise PopplerNotFound() from OSError
+        raise DependencyError(_POPPLER_ERR_MSG) from OSError
 
     raw_version = output.decode("utf-8")
     list_version = raw_version.split("\n", maxsplit=1)[0].split(" ")[-1].split(".")
@@ -545,7 +529,9 @@ def get_doctr_requirement() -> Requirement:
         if not get_poppler_version():
             return get_doctr_requirement()
         # don't know yet how to check whether pango gdk-pixbuf libffi are installed
-        logger.info("package requires weasyprint. Check that poppler pango gdk-pixbuf libffi are installed")
+        logger.info(
+            LoggingRecord("package requires weasyprint. Check that poppler pango gdk-pixbuf libffi are installed")
+        )
     return "doctr", doctr_available(), _DOCTR_ERR_MSG
 
 
@@ -628,6 +614,45 @@ def get_pillow_requirement() -> Requirement:
     Return OpenCV requirement
     """
     return "pillow", pillow_available(), _PILLOW_ERR_MSG
+
+
+# Pypdfium2
+_PYPDFIUM2_AVAILABLE = importlib.util.find_spec("pypdfium2") is not None
+_PYPDFIUM2_ERR_MSG = f"pypdfium2 must be installed. {_GENERIC_ERR_MSG}"
+
+
+def pypdfium2_available() -> bool:
+    """
+    Returns True if pypdfium2 is installed
+    """
+    return bool(_PYPDFIUM2_AVAILABLE)
+
+
+def get_pypdfium2_requirement() -> Requirement:
+    """
+    Return pypdfium2 requirement
+    """
+    return "pypdfium2", pypdfium2_available(), _PYPDFIUM2_ERR_MSG
+
+
+# SpaCy
+_SPACY_AVAILABLE = importlib.util.find_spec("spacy") is not None
+_SPACY_ERR_MSG = f"SpaCy must be installed. {_GENERIC_ERR_MSG}"
+
+
+def spacy_available() -> bool:
+    """
+    Returns True if SpaCy is installed
+    """
+
+    return bool(_SPACY_AVAILABLE)
+
+
+def get_spacy_requirement() -> Requirement:
+    """
+    Return SpaCy requirement
+    """
+    return "spacy", spacy_available(), _SPACY_ERR_MSG
 
 
 def set_mp_spawn() -> None:

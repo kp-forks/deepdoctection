@@ -19,6 +19,7 @@
 Testing the module datapoint.image
 """
 
+from collections import defaultdict
 from typing import Union
 
 from numpy import float32, ones
@@ -26,8 +27,9 @@ from numpy.testing import assert_array_equal
 from pytest import mark, raises
 
 from deepdoctection.dataflow import DataFlow, MapData, SerializerJsonlines
-from deepdoctection.datapoint import BoundingBox, CategoryAnnotation, Image, ImageAnnotation
+from deepdoctection.datapoint import AnnotationMap, BoundingBox, CategoryAnnotation, Image, ImageAnnotation
 from deepdoctection.utils import get_uuid
+from deepdoctection.utils.error import ImageError
 from deepdoctection.utils.settings import get_type
 
 from ..test_utils import anns_to_ids, collect_datapoint_from_dataflow, get_test_path
@@ -82,7 +84,7 @@ class TestImage:
         test_image = Image(file_name=image.file_name, location=image.loc, external_id=image.external_id)
 
         # Act and assert
-        with raises(ValueError):
+        with raises(ImageError):
             test_image.image_id = "ec2aac06-c261-3669-b8bd-4486a54ce740"
 
     @staticmethod
@@ -166,10 +168,10 @@ class TestImage:
         test_image = Image(location=image.loc, file_name=image.file_name)
         cat = ImageAnnotation(
             category_name="FOO",
-            category_id="1",
+            category_id=1,
             bounding_box=BoundingBox(ulx=1.0, uly=1.0, width=1.0, height=2.0, absolute_coords=True),
         )
-        sub_cat_1 = CategoryAnnotation(category_name="BAK", category_id="2")
+        sub_cat_1 = CategoryAnnotation(category_name="BAK", category_id=2)
 
         # Act
         cat.dump_sub_category(get_type("BAK"), sub_cat_1, test_image.image_id)
@@ -193,14 +195,14 @@ class TestImage:
         test_image = Image(location=image.loc, file_name=image.file_name)
         cat = ImageAnnotation(
             category_name="FOO",
-            category_id="1",
+            category_id=1,
             bounding_box=BoundingBox(ulx=1.0, uly=1.0, width=1.0, height=2.0, absolute_coords=True),
         )
 
         # Act and Assert
         test_image.dump(cat)
 
-        with raises(ValueError):
+        with raises(ImageError):
             test_image.dump(cat)
 
     @staticmethod
@@ -214,45 +216,80 @@ class TestImage:
         test_image = Image(location=image.loc, file_name=image.file_name)
         cat_1 = ImageAnnotation(
             category_name="FOO",
-            category_id="1",
+            category_id=1,
             bounding_box=BoundingBox(ulx=1.0, uly=1.0, width=1.0, height=2.0, absolute_coords=True),
         )
         cat_2 = ImageAnnotation(
             category_name="BAK",
-            category_id="2",
+            category_id=2,
             bounding_box=BoundingBox(ulx=2.0, uly=2.0, width=2.0, height=2.0, absolute_coords=True),
         )
         cat_3 = ImageAnnotation(
             category_name="BAK",
-            category_id="1",
+            category_id=1,
             bounding_box=BoundingBox(ulx=1.5, uly=2.4, width=3.0, height=9.0, absolute_coords=True),
+        )
+        cat_4 = ImageAnnotation(
+            category_name="BLI",
+            category_id=3,
+            bounding_box=BoundingBox(ulx=1.5, uly=2.4, width=3.0, height=9.0, absolute_coords=True),
+            service_id="test_service",
+        )
+        cat_5 = ImageAnnotation(
+            category_name="BLU",
+            category_id=5,
+            bounding_box=BoundingBox(ulx=1.5, uly=2.4, width=3.0, height=9.0, absolute_coords=True),
+            model_id="test_model",
         )
 
         test_image.dump(cat_1)
         test_image.dump(cat_2)
         test_image.dump(cat_3)
+        test_image.dump(cat_4)
+        test_image.dump(cat_5)
 
         # Act
         filtered_anns_1 = test_image.get_annotation(category_names="FOO")
         filtered_anns_1_ids = anns_to_ids(filtered_anns_1)
+
         filtered_anns_2 = test_image.get_annotation(category_names="BLA")
         filtered_anns_2_ids = anns_to_ids(filtered_anns_2)
-        filtered_anns_3 = test_image.get_annotation(annotation_ids=[cat_1.annotation_id, cat_3.annotation_id])
 
+        filtered_anns_3 = test_image.get_annotation(annotation_ids=[cat_1.annotation_id, cat_3.annotation_id])
         filtered_anns_3_ids = anns_to_ids(filtered_anns_3)
+
         filtered_anns_4 = test_image.get_annotation(
             annotation_ids=[cat_2.annotation_id, cat_3.annotation_id],
         )
         filtered_anns_4_ids = anns_to_ids(filtered_anns_4)
-        filtered_anns_5 = test_image.get_annotation_iter()
+
+        filtered_anns_5 = test_image.get_annotation()
         filtered_anns_5_ids = anns_to_ids(filtered_anns_5)
+
+        filtered_anns_6 = test_image.get_annotation(service_id="test_service")
+        filtered_anns_6_ids = anns_to_ids(filtered_anns_6)
+
+        filtered_anns_7 = test_image.get_annotation(model_id="test_model")
+        filtered_anns_7_ids = anns_to_ids(filtered_anns_7)
+
+        filtered_anns_8 = test_image.get_annotation(service_id="test_model", annotation_ids=[cat_2.annotation_id])
+        filtered_anns_8_ids = anns_to_ids(filtered_anns_8)
 
         # Assert
         assert set(filtered_anns_1_ids) == {cat_1.annotation_id}
         assert set(filtered_anns_2_ids) == set()
         assert set(filtered_anns_3_ids) == {cat_1.annotation_id, cat_3.annotation_id}
         assert set(filtered_anns_4_ids) == {cat_2.annotation_id, cat_3.annotation_id}
-        assert set(filtered_anns_5_ids) == {cat_1.annotation_id, cat_2.annotation_id, cat_3.annotation_id}
+        assert set(filtered_anns_5_ids) == {
+            cat_1.annotation_id,
+            cat_2.annotation_id,
+            cat_3.annotation_id,
+            cat_4.annotation_id,
+            cat_5.annotation_id,
+        }
+        assert set(filtered_anns_6_ids) == {cat_4.annotation_id}
+        assert set(filtered_anns_7_ids) == {cat_5.annotation_id}
+        assert set(filtered_anns_8_ids) == set()
 
     @staticmethod
     @mark.basic
@@ -307,6 +344,16 @@ class TestImage:
 
     @staticmethod
     @mark.basic
+    def test_load_image_from_legacy_test_file() -> None:
+        """
+        test class from_file returns an image
+        """
+        test_file_path = get_test_path() / "legacy_test_image.json"
+        image = Image.from_file(test_file_path.as_posix())
+        assert isinstance(image, Image)
+
+    @staticmethod
+    @mark.basic
     def test_state_id_changes_when_annotations_added(image: WhiteImage) -> None:
         """
         state_id changes when annotations are added
@@ -316,17 +363,17 @@ class TestImage:
         test_image = Image(location=image.loc, file_name=image.file_name)
         cat_1 = ImageAnnotation(
             category_name="FOO",
-            category_id="1",
+            category_id=1,
             bounding_box=BoundingBox(ulx=1.0, uly=1.0, width=1.0, height=2.0, absolute_coords=True),
         )
         cat_2 = ImageAnnotation(
             category_name="BAK",
-            category_id="2",
+            category_id=2,
             bounding_box=BoundingBox(ulx=2.0, uly=2.0, width=2.0, height=2.0, absolute_coords=True),
         )
         cat_3 = ImageAnnotation(
             category_name="BAK",
-            category_id="1",
+            category_id=1,
             bounding_box=BoundingBox(ulx=1.5, uly=2.4, width=3.0, height=9.0, absolute_coords=True),
         )
 
@@ -339,3 +386,75 @@ class TestImage:
         # Act
         test_image.dump(cat_3)
         assert test_image.state_id == "ceb9021b-c96d-36e1-9cd5-465b48cae58b"
+
+    @staticmethod
+    @mark.basic
+    def test_get_annotation_id_to_annotation_maps(
+        dp_image_with_layout_and_word_annotations: Image, annotation_maps: defaultdict[str, list[AnnotationMap]]
+    ) -> None:
+        """
+        get_annotation_id_to_annotation_maps
+        """
+
+        # Arrange
+        dp = dp_image_with_layout_and_word_annotations
+        expected_annotation_maps = annotation_maps
+
+        # Act
+        ann_maps = dp.get_annotation_id_to_annotation_maps()
+
+        # Assert
+        assert ann_maps == expected_annotation_maps
+
+    @staticmethod
+    @mark.basic
+    def test_get_service_id_to_annotation_id(
+        dp_image_with_layout_and_word_annotations: Image, service_id_to_ann_id: dict[str, list[str]]
+    ) -> None:
+        """
+        get_service_id_to_annotation_id
+        """
+
+        # Arrange
+        dp = dp_image_with_layout_and_word_annotations
+        expected_service_id_to_ann_id = service_id_to_ann_id
+
+        # Act
+        service_id_to_ann_id = dp.get_service_id_to_annotation_id()
+
+        # Assert
+        assert service_id_to_ann_id == expected_service_id_to_ann_id
+
+    @staticmethod
+    @mark.basic
+    def test_remove_by_annotation_id(dp_image_with_layout_and_word_annotations: Image) -> None:
+        """
+        remove
+        """
+
+        # Arrange
+        dp = dp_image_with_layout_and_word_annotations
+
+        # Act
+        dp.remove(annotation_ids=["c603f62d-211b-335d-9401-350b17842562", "01c4dc98-88fb-3d7e-b623-c52117bfc74a"])
+
+        # Assert
+        anns = dp.get_annotation(annotation_ids="c603f62d-211b-335d-9401-350b17842562")
+        assert not anns
+
+    @staticmethod
+    @mark.basic
+    def test_remove_by_service_id(dp_image_with_layout_and_word_annotations: Image) -> None:
+        """
+        remove
+        """
+
+        # Arrange
+        dp = dp_image_with_layout_and_word_annotations
+
+        # Act
+        dp.remove(service_ids="test_service")
+
+        # Assert
+        anns = dp.get_annotation(service_id="test_service")
+        assert not anns

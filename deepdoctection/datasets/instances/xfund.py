@@ -27,6 +27,7 @@ Module for XFUND dataset. Install the dataset following the folder structure
     │ ├── de_val_0.jpg
     ├── es_train
 """
+from __future__ import annotations
 
 import json
 import os
@@ -36,8 +37,8 @@ from ...dataflow import CustomDataFromList, DataFlow, MapData
 from ...datasets.info import DatasetInfo
 from ...mapper.cats import cat_to_sub_cat, filter_cat
 from ...mapper.xfundstruct import xfund_to_image
-from ...utils.detection_types import JsonDict
 from ...utils.settings import BioTag, DatasetType, LayoutType, ObjectTypes, TokenClasses, TokenClassWithTag, WordType
+from ...utils.types import FunsdDict
 from ..base import _BuiltInDataset
 from ..dataflow_builder import DataFlowBaseBuilder
 from ..info import DatasetCategories
@@ -55,7 +56,7 @@ _LICENSE = (
 )
 _URL = "https://github.com/doc-analysis/XFUND/releases/tag/v1.0"
 _SPLITS: Mapping[str, str] = {"train": "train", "val": "val"}
-_TYPE = DatasetType.token_classification
+_TYPE = DatasetType.TOKEN_CLASSIFICATION
 _LOCATION = "xfund"
 _ANNOTATION_FILES: Mapping[str, Union[str, Sequence[str]]] = {
     "train": [
@@ -69,24 +70,23 @@ _ANNOTATION_FILES: Mapping[str, Union[str, Sequence[str]]] = {
     ],
     "val": ["de.val.json", "es.val.json", "fr.val.json", "it.val.json", "ja.val.json", "pt.val.json", "zh.val.json"],
 }
-_INIT_CATEGORIES = [LayoutType.word, LayoutType.text]
-_SUB_CATEGORIES: Mapping[ObjectTypes, Mapping[ObjectTypes, Sequence[ObjectTypes]]]
-_SUB_CATEGORIES = {
-    LayoutType.word: {
-        WordType.token_class: [TokenClasses.other, TokenClasses.question, TokenClasses.answer, TokenClasses.header],
-        WordType.tag: [BioTag.inside, BioTag.outside, BioTag.begin],
-        WordType.token_tag: [
-            TokenClassWithTag.b_answer,
-            TokenClassWithTag.b_header,
-            TokenClassWithTag.b_question,
-            TokenClassWithTag.i_answer,
-            TokenClassWithTag.i_header,
-            TokenClassWithTag.i_question,
-            BioTag.outside,
+_INIT_CATEGORIES: Sequence[ObjectTypes] = [LayoutType.WORD, LayoutType.TEXT]
+_SUB_CATEGORIES: Mapping[ObjectTypes, Mapping[ObjectTypes, Sequence[ObjectTypes]]] = {
+    LayoutType.WORD: {
+        WordType.TOKEN_CLASS: [TokenClasses.OTHER, TokenClasses.QUESTION, TokenClasses.ANSWER, TokenClasses.HEADER],
+        WordType.TAG: [BioTag.INSIDE, BioTag.OUTSIDE, BioTag.BEGIN],
+        WordType.TOKEN_TAG: [
+            TokenClassWithTag.B_ANSWER,
+            TokenClassWithTag.B_HEADER,
+            TokenClassWithTag.B_QUESTION,
+            TokenClassWithTag.I_ANSWER,
+            TokenClassWithTag.I_HEADER,
+            TokenClassWithTag.I_QUESTION,
+            BioTag.OUTSIDE,
         ],
     },
-    LayoutType.text: {
-        WordType.token_class: [TokenClasses.other, TokenClasses.question, TokenClasses.answer, TokenClasses.header]
+    LayoutType.TEXT: {
+        WordType.TOKEN_CLASS: [TokenClasses.OTHER, TokenClasses.QUESTION, TokenClasses.ANSWER, TokenClasses.HEADER]
     },
 }
 
@@ -108,7 +108,7 @@ class Xfund(_BuiltInDataset):
     def _categories(self) -> DatasetCategories:
         return DatasetCategories(init_categories=_INIT_CATEGORIES, init_sub_categories=_SUB_CATEGORIES)
 
-    def _builder(self) -> "XfundBuilder":
+    def _builder(self) -> XfundBuilder:
         return XfundBuilder(location=_LOCATION, annotation_files=_ANNOTATION_FILES)
 
 
@@ -167,7 +167,7 @@ class XfundBuilder(DataFlowBaseBuilder):
         df = CustomDataFromList(datapoints, max_datapoints=max_datapoints)
 
         # Map
-        def replace_filename(dp: JsonDict) -> JsonDict:
+        def replace_filename(dp: FunsdDict) -> FunsdDict:
             folder = "_".join(dp["id"].split("_", 2)[:2])
             dp["img"]["fname"] = os.path.join(self.get_workdir(), folder, dp["img"]["fname"])
             return dp
@@ -175,18 +175,40 @@ class XfundBuilder(DataFlowBaseBuilder):
         df = MapData(df, replace_filename)
         categories_name_as_key = self.categories.get_categories(init=True, name_as_key=True)
         token_class_names_mapping = {
-            "other": TokenClasses.other,
-            "question": TokenClasses.question,
-            "answer": TokenClasses.answer,
-            "header": TokenClasses.header,
+            "other": TokenClasses.OTHER,
+            "question": TokenClasses.QUESTION,
+            "answer": TokenClasses.ANSWER,
+            "header": TokenClasses.HEADER,
         }
-        ner_token_to_id_mapping = self.categories.get_sub_categories(
-            categories=LayoutType.word,
-            sub_categories={LayoutType.word: [WordType.token_tag, WordType.tag, WordType.token_class]},
-            keys=False,
-            values_as_dict=True,
-            name_as_key=True,
-        )
+        if LayoutType.WORD in self.categories.get_categories(filtered=True, name_as_key=True):
+            ner_token_to_id_mapping = self.categories.get_sub_categories(
+                categories=LayoutType.WORD,
+                sub_categories={LayoutType.WORD: [WordType.TOKEN_TAG, WordType.TAG, WordType.TOKEN_CLASS]},
+                keys=False,
+                values_as_dict=True,
+                name_as_key=True,
+            )
+        else:
+            ner_token_to_id_mapping = {
+                LayoutType.WORD: {
+                    WordType.TAG: {BioTag.BEGIN: 3, BioTag.INSIDE: 1, BioTag.OUTSIDE: 2},
+                    WordType.TOKEN_CLASS: {
+                        TokenClasses.ANSWER: 3,
+                        TokenClasses.HEADER: 4,
+                        TokenClasses.OTHER: 1,
+                        TokenClasses.QUESTION: 2,
+                    },
+                    WordType.TOKEN_TAG: {
+                        TokenClassWithTag.B_ANSWER: 1,
+                        TokenClassWithTag.B_HEADER: 2,
+                        TokenClassWithTag.B_QUESTION: 3,
+                        TokenClassWithTag.I_ANSWER: 4,
+                        TokenClassWithTag.I_HEADER: 5,
+                        TokenClassWithTag.I_QUESTION: 6,
+                        BioTag.OUTSIDE: 7,
+                    },
+                }
+            }
         df = MapData(
             df,
             xfund_to_image(
