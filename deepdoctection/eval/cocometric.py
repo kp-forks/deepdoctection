@@ -18,22 +18,24 @@
 """
 Module for metrics that require the COCOeval class.
 """
+from __future__ import annotations
 
 from copy import copy
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import numpy as np
+from lazy_imports import try_import
 
 from ..dataflow import DataFlow
 from ..datasets.info import DatasetCategories
 from ..mapper.cats import re_assign_cat_ids
 from ..mapper.cocostruct import image_to_coco
-from ..utils.detection_types import JsonDict
 from ..utils.file_utils import Requirement, cocotools_available, get_cocotools_requirement
+from ..utils.types import JsonDict, MetricResults
 from .base import MetricBase
 from .registry import metric_registry
 
-if cocotools_available():
+with try_import() as cc_import_guard:
     from pycocotools.coco import COCO
     from pycocotools.cocoeval import COCOeval
 
@@ -69,8 +71,8 @@ https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocotools/cocoeva
 
 
 def _summarize(  # type: ignore
-    self, ap: int = 1, iouThr: float = 0.9, areaRng: str = "all", maxDets: int = 100
-) -> float:
+    self, ap: int = 1, iouThr: float = 0.9, areaRng: str = "all", maxDets: int = 100, per_category: bool = False
+) -> Union[float, list[float]]:
     # pylint: disable=C0103
     p = self.params
     iStr = " {:<18} {} @[ IoU={:<9} | area={:>6s} | maxDets={:>3d} ] = {:0.3f}"
@@ -84,6 +86,36 @@ def _summarize(  # type: ignore
 
     aind = [i for i, aRng in enumerate(p.areaRngLbl) if aRng == areaRng]
     mind = [i for i, mDet in enumerate(p.maxDets) if mDet == maxDets]
+    if per_category:
+        if ap == 1:
+            s = self.eval["precision"]
+            num_classes = s.shape[2]
+            results_per_class = []
+            for idx in range(num_classes):
+                if iouThr is not None:
+                    s = self.eval["precision"]
+                    t = np.where(iouThr == p.iouThrs)[0]
+                    s = s[t]
+                precision = s[:, :, idx, aind, mind]
+                precision = precision[precision > -1]
+                res = np.mean(precision) if precision.size else float("nan")
+                results_per_class.append(float(res))
+                print(f"Precision for class {idx+1}: @[ IoU={iouStr} | area={areaRng} | maxDets={maxDets} ] = {res}")
+        else:
+            s = self.eval["recall"]
+            num_classes = s.shape[1]
+            results_per_class = []
+            for idx in range(num_classes):
+                if iouThr is not None:
+                    s = self.eval["recall"]
+                    t = np.where(iouThr == p.iouThrs)[0]
+                    s = s[t]
+                recall = s[:, idx, aind, mind]
+                recall = recall[recall > -1]
+                res = np.mean(recall) if recall.size else float("nan")
+                results_per_class.append(float(res))
+                print(f"Recall for class {idx+1}: @[ IoU={iouStr} | area={areaRng} | maxDets={maxDets} ] = {res}")
+        return results_per_class
     if ap == 1:
         # dimension of precision: [TxRxKxAxM]
         s = self.eval["precision"]
@@ -119,15 +151,16 @@ class CocoMetric(MetricBase):
 
     name = "mAP and mAR"
     metric = COCOeval if cocotools_available() else None
-    mapper = image_to_coco  # type: ignore
+    mapper = image_to_coco
     _f1_score = None
     _f1_iou = None
-    _params: Dict[str, Union[List[int], List[List[int]]]] = {}
+    _per_category = False
+    _params: dict[str, Union[list[int], list[list[int]]]] = {}
 
     @classmethod
     def dump(
         cls, dataflow_gt: DataFlow, dataflow_predictions: DataFlow, categories: DatasetCategories
-    ) -> Tuple["COCO", "COCO"]:
+    ) -> tuple[COCO, COCO]:
         cats = [{"id": int(k), "name": v} for k, v in categories.get_categories(as_dict=True, filtered=True).items()]
         imgs_gt, imgs_pr = [], []
         anns_gt, anns_pr = [], []
@@ -136,11 +169,11 @@ class CocoMetric(MetricBase):
         dataflow_predictions.reset_state()
 
         for dp_gt, dp_pred in zip(dataflow_gt, dataflow_predictions):
-            img_gt, ann_gt = cls.mapper(dp_gt)  # type: ignore
+            img_gt, ann_gt = cls.mapper(dp_gt)
             dp_pred = re_assign_cat_ids(categories.get_categories(as_dict=True, filtered=True, name_as_key=True))(
                 dp_pred
             )
-            img_pr, ann_pr = cls.mapper(dp_pred)  # type: ignore
+            img_pr, ann_pr = cls.mapper(dp_pred)
             imgs_gt.append(img_gt)
             imgs_pr.append(img_pr)
             anns_gt.extend(ann_gt)
@@ -161,7 +194,7 @@ class CocoMetric(MetricBase):
     @classmethod
     def get_distance(
         cls, dataflow_gt: DataFlow, dataflow_predictions: DataFlow, categories: DatasetCategories
-    ) -> List[JsonDict]:
+    ) -> list[MetricResults]:
         coco_gt, coco_predictions = cls.dump(dataflow_gt, dataflow_predictions, categories)
 
         metric = cls.metric(coco_gt, coco_predictions, iouType="bbox")
@@ -174,24 +207,34 @@ class CocoMetric(MetricBase):
 
         if cls._f1_score:
             summary_bbox = [
-                metric.summarize_f1(1, cls._f1_iou, maxDets=metric.params.maxDets[2]),
-                metric.summarize_f1(0, cls._f1_iou, maxDets=metric.params.maxDets[2]),
+                metric.summarize_f1(1, cls._f1_iou, maxDets=metric.params.maxDets[2], per_category=cls._per_category),
+                metric.summarize_f1(0, cls._f1_iou, maxDets=metric.params.maxDets[2], per_category=cls._per_category),
             ]
         else:
             metric.summarize()
             summary_bbox = metric.stats
 
         results = []
-        for params, value in zip(cls.get_summary_default_parameters(), summary_bbox):
+
+        default_parameters = cls.get_summary_default_parameters()
+        if cls._per_category:
+            default_parameters = default_parameters * len(summary_bbox[0])
+            summary_bbox = [item for pair in zip(*summary_bbox) for item in pair]
+        val = 0
+        for idx, (params, value) in enumerate(zip(default_parameters, summary_bbox)):
             params = copy(params)
             params["mode"] = "bbox"
             params["val"] = value
+            if cls._per_category:
+                if idx % 2 == 0:
+                    val += 1
+                params["category_id"] = val
             results.append(params)
 
         return results
 
     @classmethod
-    def get_summary_default_parameters(cls) -> List[JsonDict]:
+    def get_summary_default_parameters(cls) -> list[JsonDict]:
         """
         Returns default parameters of evaluation results. May differ from other CocoMetric classes.
 
@@ -199,32 +242,36 @@ class CocoMetric(MetricBase):
                  area range and maximum detections.
         """
         if cls._f1_score:
+            for el, idx in zip(_F1_DEFAULTS, [2, 2]):
+                if cls._params:
+                    if cls._params.get("maxDets") is not None:
+                        el["maxDets"] = cls._params["maxDets"][idx]
+                el["iouThr"] = cls._f1_iou
+            return _F1_DEFAULTS
+
+        for el, idx in zip(_COCOEVAL_DEFAULTS, _MAX_DET_INDEX):
             if cls._params:
                 if cls._params.get("maxDets") is not None:
-                    for el, idx in zip(_F1_DEFAULTS, [2, 2]):
-                        el["maxDets"] = cls._params["maxDets"][idx]
-                        el["iouThr"] = cls._f1_iou
-                    return _F1_DEFAULTS
-        if cls._params:
-            if cls._params.get("maxDets") is not None:
-                for el, idx in zip(_COCOEVAL_DEFAULTS, _MAX_DET_INDEX):
                     el["maxDets"] = cls._params["maxDets"][idx]
         return _COCOEVAL_DEFAULTS
 
     @classmethod
     def set_params(
         cls,
-        max_detections: Optional[List[int]] = None,
-        area_range: Optional[List[List[int]]] = None,
+        max_detections: Optional[list[int]] = None,
+        area_range: Optional[list[list[int]]] = None,
         f1_score: bool = False,
         f1_iou: float = 0.9,
+        per_category: bool = False,
     ) -> None:
         """
         Setting params for different coco metric modes.
 
         :param max_detections: The maximum number of detections to consider
         :param area_range: The area range to classify objects as "all", "small", "medium" and "large"
-        :param f1_score: Will use f1 score setting with default iouThr 0.9
+        :param f1_score: Will use f1 score setting with default iouThr 0.9. To be more precise it does not calculate
+                         the f1 score but the precision and recall for a given iou threshold. Use the harmonic mean to
+                         get the ultimate f1 score.
         :param f1_iou: Use with f1_score True and reset the f1 iou threshold
         """
         if max_detections is not None:
@@ -236,7 +283,8 @@ class CocoMetric(MetricBase):
 
         cls._f1_score = f1_score
         cls._f1_iou = f1_iou
+        cls._per_category = per_category
 
     @classmethod
-    def get_requirements(cls) -> List[Requirement]:
+    def get_requirements(cls) -> list[Requirement]:
         return [get_cocotools_requirement()]

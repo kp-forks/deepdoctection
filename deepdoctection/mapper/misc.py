@@ -19,33 +19,45 @@
 Module for small mapping functions
 """
 
+from __future__ import annotations
+
 import ast
 import os
-from typing import List, Mapping, Optional, Sequence, Union
+from typing import Mapping, Optional, Sequence, Union
 
-from ..datapoint.convert import convert_pdf_bytes_to_np_array_v2
+from lazy_imports import try_import
+
+from ..datapoint.convert import convert_bytes_to_np_array, convert_pdf_bytes_to_np_array_v2
 from ..datapoint.image import Image
-from ..utils.detection_types import JsonDict
-from ..utils.file_utils import lxml_available
 from ..utils.fs import get_load_image_func, load_image_from_file
+from ..utils.types import JsonDict
 from ..utils.utils import is_file_extension
 from .maputils import MappingContextManager, curry
 
-if lxml_available():
+with try_import() as import_guard:
     from lxml import etree  # pylint: disable=W0611
 
 
-def to_image(dp: Union[str, Mapping[str, Union[str, bytes]]], dpi: Optional[int] = None) -> Optional[Image]:
+def to_image(
+    dp: Union[str, Mapping[str, Union[str, bytes]]],
+    dpi: Optional[int] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+) -> Optional[Image]:
     """
     Mapping an input from `dataflow.SerializerFiles` or similar to an Image
 
     :param dp: Image
     :param dpi: dot per inch definition for pdf resolution when converting to numpy array
+    :param width: target width of the image. This option does only work when using Poppler as PDF renderer
+    :param height: target width of the image. This option does only work when using Poppler as PDF renderer
+    :param height: target height of the image
     :return: Image
     """
 
     file_name: Optional[str]
     location: Optional[str]
+    image_bytes: Optional[bytes] = None
 
     if isinstance(dp, str):
         _, file_name = os.path.split(dp)
@@ -59,6 +71,7 @@ def to_image(dp: Union[str, Mapping[str, Union[str, bytes]]], dpi: Optional[int]
         document_id = dp.get("document_id")
         if location == "":
             location = str(dp.get("path", ""))
+        image_bytes = dp.get("image_bytes")
     else:
         raise TypeError("datapoint not of expected type for converting to image")
 
@@ -72,7 +85,11 @@ def to_image(dp: Union[str, Mapping[str, Union[str, bytes]]], dpi: Optional[int]
                 dp_image.pdf_bytes = dp.get("pdf_bytes")
                 if dp_image.pdf_bytes is not None:
                     if isinstance(dp_image.pdf_bytes, bytes):
-                        dp_image.image = convert_pdf_bytes_to_np_array_v2(dp_image.pdf_bytes, dpi=dpi)
+                        dp_image.image = convert_pdf_bytes_to_np_array_v2(
+                            dp_image.pdf_bytes, dpi=dpi, width=width, height=height
+                        )
+            elif image_bytes is not None:
+                dp_image.image = convert_bytes_to_np_array(image_bytes)
             else:
                 dp_image.image = load_image_from_file(location)
 
@@ -132,7 +149,7 @@ def maybe_remove_image_from_category(dp: Image, category_names: Optional[Union[s
     return dp
 
 
-def image_ann_to_image(dp: Image, category_names: Union[str, List[str]], crop_image: bool = True) -> Image:
+def image_ann_to_image(dp: Image, category_names: Union[str, list[str]], crop_image: bool = True) -> Image:
     """
     Adds `image` to annotations with given category names
 
@@ -142,7 +159,7 @@ def image_ann_to_image(dp: Image, category_names: Union[str, List[str]], crop_im
     :return: Image
     """
 
-    img_anns = dp.get_annotation_iter(category_names=category_names)
+    img_anns = dp.get_annotation(category_names=category_names)
     for ann in img_anns:
         dp.image_ann_to_image(annotation_id=ann.annotation_id, crop_image=crop_image)
 
@@ -151,7 +168,7 @@ def image_ann_to_image(dp: Image, category_names: Union[str, List[str]], crop_im
 
 @curry
 def maybe_ann_to_sub_image(
-    dp: Image, category_names_sub_image: Union[str, List[str]], category_names: Union[str, List[str]], add_summary: bool
+    dp: Image, category_names_sub_image: Union[str, list[str]], category_names: Union[str, list[str]], add_summary: bool
 ) -> Image:
     """
     Assigns to sub image with given category names all annotations with given category names whose bounding box lie
@@ -175,7 +192,7 @@ def maybe_ann_to_sub_image(
 
 
 @curry
-def xml_to_dict(dp: JsonDict, xslt_obj: "etree.XSLT") -> JsonDict:
+def xml_to_dict(dp: JsonDict, xslt_obj: etree.XSLT) -> JsonDict:
     """
     Convert a xml object into a dict using a xsl style sheet.
 
@@ -193,7 +210,6 @@ def xml_to_dict(dp: JsonDict, xslt_obj: "etree.XSLT") -> JsonDict:
     """
 
     output = str(xslt_obj(dp["xml"]))
-    output = ast.literal_eval(output.replace('<?xml version="1.0"?>', ""))
     dp.pop("xml")
-    dp["json"] = output
+    dp["json"] = ast.literal_eval(output.replace('<?xml version="1.0"?>', ""))
     return dp

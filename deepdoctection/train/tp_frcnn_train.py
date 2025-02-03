@@ -20,27 +20,9 @@ Module for training Tensorpack `GeneralizedRCNN`
 """
 
 import os
-from typing import Dict, List, Optional, Sequence, Type, Union
+from typing import Optional, Sequence, Type, Union
 
-# pylint: disable=import-error
-from tensorpack.callbacks import (
-    EstimatedTimeLeft,
-    GPUMemoryTracker,
-    GPUUtilizationTracker,
-    HostMemoryTracker,
-    ModelSaver,
-    PeriodicCallback,
-    ScheduledHyperParamSetter,
-    SessionRunTimeout,
-    ThroughputTracker,
-)
-
-# todo: check how dataflow import is directly possible without having AssertionError
-from tensorpack.dataflow import ProxyDataFlow, imgaug
-from tensorpack.input_source import QueueInput
-from tensorpack.tfutils import SmartInit
-from tensorpack.train import SyncMultiGPUTrainerReplicated, TrainConfig, launch_train_with_config
-from tensorpack.utils import logger
+from lazy_imports import try_import
 
 from ..dataflow.base import DataFlow
 from ..dataflow.common import MapData
@@ -58,15 +40,34 @@ from ..extern.tp.tpfrcnn.preproc import anchors_and_labels, augment
 from ..extern.tpdetect import TPFrcnnDetector
 from ..mapper.maputils import LabelSummarizer
 from ..mapper.tpstruct import image_to_tp_frcnn_training
-from ..pipe.base import PredictorPipelineComponent
 from ..pipe.registry import pipeline_component_registry
-from ..utils.detection_types import JsonDict
 from ..utils.file_utils import set_mp_spawn
 from ..utils.fs import get_load_image_func
 from ..utils.logger import log_once
 from ..utils.metacfg import AttrDict, set_config_by_yaml
 from ..utils.tqdm import get_tqdm
+from ..utils.types import JsonDict, PathLikeOrStr
 from ..utils.utils import string_to_dict
+
+with try_import() as tp_import_guard:
+    # todo: check how dataflow import is directly possible without having an AssertionError
+    # pylint: disable=import-error
+    from tensorpack.callbacks import (
+        EstimatedTimeLeft,
+        GPUMemoryTracker,
+        GPUUtilizationTracker,
+        HostMemoryTracker,
+        ModelSaver,
+        PeriodicCallback,
+        ScheduledHyperParamSetter,
+        SessionRunTimeout,
+        ThroughputTracker,
+    )
+    from tensorpack.dataflow import ProxyDataFlow, imgaug
+    from tensorpack.input_source import QueueInput
+    from tensorpack.tfutils import SmartInit
+    from tensorpack.train import SyncMultiGPUTrainerReplicated, TrainConfig, launch_train_with_config
+    from tensorpack.utils import logger
 
 __all__ = ["train_faster_rcnn"]
 
@@ -183,11 +184,11 @@ def get_train_dataflow(
 
 
 def train_faster_rcnn(
-    path_config_yaml: str,
+    path_config_yaml: PathLikeOrStr,
     dataset_train: DatasetBase,
-    path_weights: str = "",
-    config_overwrite: Optional[List[str]] = None,
-    log_dir: str = "train_log/frcnn",
+    path_weights: PathLikeOrStr,
+    config_overwrite: Optional[list[str]] = None,
+    log_dir: PathLikeOrStr = "train_log/frcnn",
     build_train_config: Optional[Sequence[str]] = None,
     dataset_val: Optional[DatasetBase] = None,
     build_val_config: Optional[Sequence[str]] = None,
@@ -222,13 +223,13 @@ def train_faster_rcnn(
 
     assert disable_tfv2()  # TP works only in Graph mode
 
-    build_train_dict: Dict[str, str] = {}
+    build_train_dict: dict[str, str] = {}
     if build_train_config is not None:
         build_train_dict = string_to_dict(",".join(build_train_config))
     if "split" not in build_train_dict:
         build_train_dict["split"] = "train"
 
-    build_val_dict: Dict[str, str] = {}
+    build_val_dict: dict[str, str] = {}
     if build_val_config is not None:
         build_val_dict = string_to_dict(",".join(build_val_config))
     if "split" not in build_val_dict:
@@ -236,7 +237,7 @@ def train_faster_rcnn(
 
     config_overwrite = [] if config_overwrite is None else config_overwrite
 
-    log_dir = "TRAIN.LOG_DIR=" + log_dir
+    log_dir = "TRAIN.LOG_DIR=" + os.fspath(log_dir)
     config_overwrite.append(log_dir)
 
     config = set_config_by_yaml(path_config_yaml)
@@ -297,7 +298,6 @@ def train_faster_rcnn(
         )  # only a wrapper for the predictor itself. Will be replaced in Callback
         pipeline_component_cls = pipeline_component_registry.get(pipeline_component_name)
         pipeline_component = pipeline_component_cls(detector)
-        assert isinstance(pipeline_component, PredictorPipelineComponent)
         category_names = list(categories.values())
         callbacks.extend(
             [
@@ -308,6 +308,7 @@ def train_faster_rcnn(
                     metric,  # type: ignore
                     pipeline_component,
                     *model.get_inference_tensor_names(),  # type: ignore
+                    cfg=detector.model.cfg,
                     **build_val_dict
                 )
             ]

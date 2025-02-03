@@ -20,16 +20,16 @@ Module for transform style pipeline components. These pipeline components are us
 on images (e.g. deskew, de-noising or more general GAN like operations.
 """
 
+from __future__ import annotations
+
 from ..datapoint.image import Image
 from ..extern.base import ImageTransformer
-from ..utils.detection_types import JsonDict
-from ..utils.logger import logger
-from .base import ImageTransformPipelineComponent
+from .base import MetaAnnotation, PipelineComponent
 from .registry import pipeline_component_registry
 
 
 @pipeline_component_registry.register("SimpleTransformService")
-class SimpleTransformService(ImageTransformPipelineComponent):
+class SimpleTransformService(PipelineComponent):
     """
     Pipeline component for transforming an image. The service is designed for applying transform predictors that
     take an image as numpy array as input and return the same. The service itself will change the underlying metadata
@@ -45,33 +45,44 @@ class SimpleTransformService(ImageTransformPipelineComponent):
 
         :param transform_predictor: image transformer
         """
-        super().__init__(self._get_name(transform_predictor.name), transform_predictor)
+        self.transform_predictor = transform_predictor
+        super().__init__(self._get_name(transform_predictor.name), self.transform_predictor.model_id)
 
     def serve(self, dp: Image) -> None:
         if dp.annotations:
-            logger.warning(
-                "%s has already received image with image annotations. These annotations will not "
-                "be transformed and might cause unexpected output in your pipeline.",
-                self.name,
+            raise RuntimeError(
+                "SimpleTransformService receives datapoints with ÌmageAnnotations. This violates the "
+                "pipeline building API but this can currently be catched only at runtime. "
+                "Please make sure that this component is the first one in the pipeline."
             )
-        if dp.image is not None:
-            np_image_transform = self.transform_predictor.transform(dp.image)
-            self.dp_manager.datapoint.clear_image(True)
-            self.dp_manager.datapoint.image = np_image_transform
 
-    def clone(self) -> "SimpleTransformService":
+        if dp.image is not None:
+            detection_result = self.transform_predictor.predict(dp.image)
+            transformed_image = self.transform_predictor.transform(dp.image, detection_result)
+            self.dp_manager.datapoint.clear_image(True)
+            self.dp_manager.datapoint.image = transformed_image
+            self.dp_manager.set_summary_annotation(
+                summary_key=self.transform_predictor.get_category_names()[0],
+                summary_name=self.transform_predictor.get_category_names()[0],
+                summary_number=None,
+                summary_value=getattr(detection_result, self.transform_predictor.get_category_names()[0].value, None),
+                summary_score=detection_result.score,
+            )
+
+    def clone(self) -> SimpleTransformService:
         return self.__class__(self.transform_predictor)
 
-    def get_meta_annotation(self) -> JsonDict:
-        return dict(
-            [
-                ("image_annotations", []),
-                ("sub_categories", {}),
-                ("relationships", {}),
-                ("summaries", []),
-            ]
+    def get_meta_annotation(self) -> MetaAnnotation:
+        return MetaAnnotation(
+            image_annotations=(),
+            sub_categories={},
+            relationships={},
+            summaries=self.transform_predictor.get_category_names(),
         )
 
     @staticmethod
     def _get_name(transform_name: str) -> str:
         return f"simple_transform_{transform_name}"
+
+    def clear_predictor(self) -> None:
+        pass

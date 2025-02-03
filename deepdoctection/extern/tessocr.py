@@ -18,22 +18,28 @@
 """
 Tesseract OCR engine for text extraction
 """
+from __future__ import annotations
+
 import shlex
+import string
 import subprocess
 import sys
 from errno import ENOENT
 from itertools import groupby
-from os import environ
-from typing import Any, Dict, List, Optional, Union
+from os import environ, fspath
+from pathlib import Path
+from typing import Any, Mapping, Optional, Union
 
-import numpy as np
+from packaging.version import InvalidVersion, Version, parse
 
 from ..utils.context import save_tmp_file, timeout_manager
-from ..utils.detection_types import ImageType, Requirement
-from ..utils.file_utils import _TESS_PATH, TesseractNotFound, get_tesseract_requirement
+from ..utils.error import DependencyError, TesseractError
+from ..utils.file_utils import _TESS_PATH, get_tesseract_requirement
 from ..utils.metacfg import config_to_cli_str, set_config_by_yaml
-from ..utils.settings import LayoutType, ObjectTypes
-from .base import DetectionResult, ObjectDetector, PredictorBase
+from ..utils.settings import LayoutType, ObjectTypes, PageType
+from ..utils.types import PathLikeOrStr, PixelValues, Requirement
+from ..utils.viz import viz_handler
+from .base import DetectionResult, ImageTransformer, ModelCategories, ObjectDetector
 
 # copy and paste with some light modifications from https://github.com/madmaze/pytesseract/tree/master/pytesseract
 
@@ -57,19 +63,7 @@ _LANG_CODE_TO_TESS_LANG_CODE = {
 }
 
 
-class TesseractError(RuntimeError):
-    """
-    Tesseract Error
-    """
-
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__()
-        self.status = status
-        self.message = message
-        self.args = (status, message)
-
-
-def _subprocess_args() -> Dict[str, Any]:
+def _subprocess_args() -> dict[str, Any]:
     # See https://github.com/pyinstaller/pyinstaller/wiki/Recipe-subprocess
     # for reference and comments.
 
@@ -84,16 +78,16 @@ def _subprocess_args() -> Dict[str, Any]:
     return kwargs
 
 
-def _input_to_cli_str(lang: str, config: str, nice: int, input_file_name: str, output_file_name_base: str) -> List[str]:
+def _input_to_cli_str(lang: str, config: str, nice: int, input_file_name: str, output_file_name_base: str) -> list[str]:
     """
     Generates a tesseract cmd as list of string with given inputs
     """
-    cmd_args: List[str] = []
+    cmd_args: list[str] = []
 
     if not sys.platform.startswith("win32") and nice != 0:
         cmd_args += ("nice", "-n", str(nice))
 
-    cmd_args += (_TESS_PATH, input_file_name, output_file_name_base, "-l", lang)
+    cmd_args += (fspath(_TESS_PATH), input_file_name, output_file_name_base, "-l", lang)
 
     if config:
         cmd_args += shlex.split(config)
@@ -103,13 +97,13 @@ def _input_to_cli_str(lang: str, config: str, nice: int, input_file_name: str, o
     return cmd_args
 
 
-def _run_tesseract(tesseract_args: List[str]) -> None:
+def _run_tesseract(tesseract_args: list[str]) -> None:
     try:
         proc = subprocess.Popen(tesseract_args, **_subprocess_args())  # pylint: disable=R1732
     except OSError as error:
         if error.errno != ENOENT:
             raise error from error
-        raise TesseractNotFound("Tesseract not found. Please install or add to your PATH.") from error
+        raise DependencyError("Tesseract not found. Please install or add to your PATH.") from error
 
     with timeout_manager(proc, 0) as error_string:
         if proc.returncode:
@@ -119,7 +113,51 @@ def _run_tesseract(tesseract_args: List[str]) -> None:
             )
 
 
-def image_to_dict(image: ImageType, lang: str, config: str) -> Dict[str, List[Union[str, int, float]]]:
+def get_tesseract_version() -> Version:
+    """
+    Returns Version object of the Tesseract version
+    """
+    try:
+        output = subprocess.check_output(
+            ["tesseract", "--version"],
+            stderr=subprocess.STDOUT,
+            env=environ,
+            stdin=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise DependencyError("Tesseract not found. Please install or add to your PATH.") from error
+
+    raw_version = output.decode("utf-8")
+    str_version, *_ = raw_version.lstrip(string.printable[10:]).partition(" ")
+    str_version, *_ = str_version.partition("-")
+
+    try:
+        version = parse(str_version)
+        assert version >= Version("3.05")
+    except (AssertionError, InvalidVersion) as error:
+        raise SystemExit(f'Invalid tesseract version: "{raw_version}"') from error
+
+    return version
+
+
+def image_to_angle(image: PixelValues) -> Mapping[str, str]:
+    """
+    Generating a tmp file and running tesseract to get the orientation of the image.
+
+    :param image: Image in np.array.
+    :return: A dictionary with keys 'Orientation in degrees' and 'Orientation confidence'.
+    """
+    with save_tmp_file(image, "tess_") as (tmp_name, input_file_name):
+        _run_tesseract(_input_to_cli_str("osd", "--psm 0", 0, input_file_name, tmp_name))
+        with open(tmp_name + ".osd", "rb") as output_file:
+            output = output_file.read().decode("utf-8")
+
+    return {
+        key_value[0]: key_value[1] for key_value in (line.split(": ") for line in output.split("\n") if len(line) >= 2)
+    }
+
+
+def image_to_dict(image: PixelValues, lang: str, config: str) -> dict[str, list[Union[str, int, float]]]:
     """
     This is more or less pytesseract.image_to_data with a dict as returned value.
     What happens under the hood is:
@@ -142,7 +180,7 @@ def image_to_dict(image: ImageType, lang: str, config: str) -> Dict[str, List[Un
         _run_tesseract(_input_to_cli_str(lang, config, 0, input_file_name, tmp_name))
         with open(tmp_name + ".tsv", "rb") as output_file:
             output = output_file.read().decode("utf-8")
-        result: Dict[str, List[Union[str, int, float]]] = {}
+        result: dict[str, list[Union[str, int, float]]] = {}
         rows = [row.split("\t") for row in output.strip().split("\n")]
         if len(rows) < 2:
             return result
@@ -173,7 +211,7 @@ def image_to_dict(image: ImageType, lang: str, config: str) -> Dict[str, List[Un
         return result
 
 
-def tesseract_line_to_detectresult(detect_result_list: List[DetectionResult]) -> List[DetectionResult]:
+def tesseract_line_to_detectresult(detect_result_list: list[DetectionResult]) -> list[DetectionResult]:
     """
     Generating text line DetectionResult based on Tesseract word grouping. It generates line bounding boxes from
     word bounding boxes.
@@ -181,7 +219,7 @@ def tesseract_line_to_detectresult(detect_result_list: List[DetectionResult]) ->
     :return: An extended list of detection result
     """
 
-    line_detect_result: List[DetectionResult] = []
+    line_detect_result: list[DetectionResult] = []
     for _, block_group_iter in groupby(detect_result_list, key=lambda x: x.block):
         block_group = []
         for _, line_group_iter in groupby(list(block_group_iter), key=lambda x: x.line):
@@ -196,7 +234,7 @@ def tesseract_line_to_detectresult(detect_result_list: List[DetectionResult]) ->
                 DetectionResult(
                     box=[ulx, uly, lrx, lry],
                     class_id=2,
-                    class_name=LayoutType.line,
+                    class_name=LayoutType.LINE,
                     text=" ".join(
                         [detect_result.text for detect_result in block_group if isinstance(detect_result.text, str)]
                     ),
@@ -207,7 +245,7 @@ def tesseract_line_to_detectresult(detect_result_list: List[DetectionResult]) ->
     return detect_result_list
 
 
-def predict_text(np_img: ImageType, supported_languages: str, text_lines: bool, config: str) -> List[DetectionResult]:
+def predict_text(np_img: PixelValues, supported_languages: str, text_lines: bool, config: str) -> list[DetectionResult]:
     """
     Calls tesseract directly with some given configs. Requires Tesseract to be installed.
 
@@ -220,7 +258,6 @@ def predict_text(np_img: ImageType, supported_languages: str, text_lines: bool, 
     :return: A list of tesseract extractions wrapped in DetectionResult
     """
 
-    np_img = np_img.astype(np.uint8)
     results = image_to_dict(np_img, supported_languages, config)
     all_results = []
 
@@ -241,12 +278,22 @@ def predict_text(np_img: ImageType, supported_languages: str, text_lines: bool, 
                 score=score / 100,
                 text=caption[5],
                 class_id=1,
-                class_name=LayoutType.word,
+                class_name=LayoutType.WORD,
             )
             all_results.append(word)
     if text_lines:
         all_results = tesseract_line_to_detectresult(all_results)
     return all_results
+
+
+def predict_rotation(np_img: PixelValues) -> Mapping[str, str]:
+    """
+    Predicts the rotation of an image using the Tesseract OCR engine.
+
+    :param np_img: numpy array of the image
+    :return: A dictionary with keys 'Orientation in degrees' and 'Orientation confidence'
+    """
+    return image_to_angle(np_img)
 
 
 class TesseractOcrDetector(ObjectDetector):
@@ -282,8 +329,8 @@ class TesseractOcrDetector(ObjectDetector):
 
     def __init__(
         self,
-        path_yaml: str,
-        config_overwrite: Optional[List[str]] = None,
+        path_yaml: PathLikeOrStr,
+        config_overwrite: Optional[list[str]] = None,
     ):
         """
         Set up the configuration which is stored in a yaml-file, that need to be passed through.
@@ -292,7 +339,9 @@ class TesseractOcrDetector(ObjectDetector):
         :param config_overwrite: Overwrite config parameters defined by the yaml file with new values.
                                  E.g. ["oem=14"]
         """
-        self.name = _TESS_PATH
+        self.name = self.get_name()
+        self.model_id = self.get_model_id()
+
         if config_overwrite is None:
             config_overwrite = []
 
@@ -300,41 +349,39 @@ class TesseractOcrDetector(ObjectDetector):
         if len(config_overwrite):
             hyper_param_config.update_args(config_overwrite)
 
-        self.path_yaml = path_yaml
+        self.path_yaml = Path(path_yaml)
         self.config_overwrite = config_overwrite
         self.config = hyper_param_config
 
         if self.config.LINES:
-            self.categories = {"1": LayoutType.word, "2": LayoutType.line}
+            self.categories = ModelCategories(init_categories={1: LayoutType.WORD, 2: LayoutType.LINE})
         else:
-            self.categories = {"1": LayoutType.word}
+            self.categories = ModelCategories(init_categories={1: LayoutType.WORD})
 
-    def predict(self, np_img: ImageType) -> List[DetectionResult]:
+    def predict(self, np_img: PixelValues) -> list[DetectionResult]:
         """
         Transfer of a numpy array and call of pytesseract. Return of the detection results.
 
         :param np_img: image as numpy array
         :return: A list of DetectionResult
         """
-        detection_results = predict_text(
+
+        return predict_text(
             np_img,
             supported_languages=self.config.LANGUAGES,
             text_lines=self.config.LINES,
             config=config_to_cli_str(self.config, "LANGUAGES", "LINES"),
         )
-        return detection_results
 
     @classmethod
-    def get_requirements(cls) -> List[Requirement]:
+    def get_requirements(cls) -> list[Requirement]:
         return [get_tesseract_requirement()]
 
-    def clone(self) -> PredictorBase:
+    def clone(self) -> TesseractOcrDetector:
         return self.__class__(self.path_yaml, self.config_overwrite)
 
-    def possible_categories(self) -> List[ObjectTypes]:
-        if self.config.LINES:
-            return [LayoutType.word, LayoutType.line]
-        return [LayoutType.word]
+    def get_category_names(self) -> tuple[ObjectTypes, ...]:
+        return self.categories.get_categories(as_dict=False)
 
     def set_language(self, language: ObjectTypes) -> None:
         """
@@ -342,3 +389,70 @@ class TesseractOcrDetector(ObjectDetector):
         :param language: `Languages`
         """
         self.config.LANGUAGES = _LANG_CODE_TO_TESS_LANG_CODE.get(language, language.value)
+
+    @staticmethod
+    def get_name() -> str:
+        """Returns the name of the model"""
+        return f"Tesseract_{get_tesseract_version()}"
+
+
+class TesseractRotationTransformer(ImageTransformer):
+    """
+    The `TesseractRotationTransformer` class is a specialized image transformer that is designed to handle image
+    rotation in the context of Optical Character Recognition (OCR) tasks. It inherits from the `ImageTransformer`
+    base class and implements methods for predicting and applying rotation transformations to images.
+
+    The `predict` method determines the angle of the rotated image. It can only handle angles that are multiples of 90
+    degrees.
+    This method uses the Tesseract OCR engine to predict the rotation angle of an image.
+
+    The `transform` method applies the predicted rotation to the image, effectively rotating the image backwards.
+    This method uses either the Pillow library or OpenCV for the rotation operation, depending on the configuration.
+
+    This class can be particularly useful in OCR tasks where the orientation of the text in the image matters.
+    The class also provides methods for cloning itself and for getting the requirements of the Tesseract OCR system.
+
+    **Example:**
+                    transformer = TesseractRotationTransformer()
+                    detection_result = transformer.predict(np_img)
+                    rotated_image = transformer.transform(np_img, detection_result)
+    """
+
+    def __init__(self) -> None:
+        self.name = fspath(_TESS_PATH) + "-rotation"
+        self.categories = ModelCategories(init_categories={1: PageType.ANGLE})
+        self.model_id = self.get_model_id()
+
+    def transform(self, np_img: PixelValues, specification: DetectionResult) -> PixelValues:
+        """
+        Applies the predicted rotation to the image, effectively rotating the image backwards.
+        This method uses either the Pillow library or OpenCV for the rotation operation, depending on the configuration.
+
+        :param np_img: The input image as a numpy array.
+        :param specification: A `DetectionResult` object containing the predicted rotation angle.
+        :return: The rotated image as a numpy array.
+        """
+        return viz_handler.rotate_image(np_img, specification.angle)  # type: ignore
+
+    def predict(self, np_img: PixelValues) -> DetectionResult:
+        """
+        Determines the angle of the rotated image. It can only handle angles that are multiples of 90 degrees.
+        This method uses the Tesseract OCR engine to predict the rotation angle of an image.
+
+        :param np_img: The input image as a numpy array.
+        :return: A `DetectionResult` object containing the predicted rotation angle and confidence.
+        """
+        output_dict = predict_rotation(np_img)
+        return DetectionResult(
+            angle=float(output_dict["Orientation in degrees"]), score=float(output_dict["Orientation confidence"])
+        )
+
+    @classmethod
+    def get_requirements(cls) -> list[Requirement]:
+        return [get_tesseract_requirement()]
+
+    def clone(self) -> TesseractRotationTransformer:
+        return self.__class__()
+
+    def get_category_names(self) -> tuple[ObjectTypes, ...]:
+        return self.categories.get_categories(as_dict=False)

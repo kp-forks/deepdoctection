@@ -42,56 +42,60 @@ sys.path.insert(0, ROOT)
 _DEPS = [
     # the minimum requirements to run pipelines without considering DL models specific dependencies
     "apted==1.0.3",
-    "catalogue==2.0.7",
+    "catalogue==2.0.10",
     "distance==0.1.3",
-    "huggingface_hub>=0.12.0",
-    "importlib-metadata>=4.11.2",
-    "jsonlines==3.0.0",
+    "huggingface_hub>=0.26.0",
+    "importlib-metadata>=5.0.0",
+    "jsonlines==3.1.0",
+    "lazy-imports==0.3.1",
     "lxml>=4.9.1",
     "mock==4.0.3",
     "networkx>=2.7.1",
-    "numpy>=1.21",
+    "numpy>=1.21,<2.0",
     "opencv-python==4.8.0.76",  # this is not required anymore, but we keep its version as a reference
     "packaging>=20.0",
     "Pillow>=10.0.0",
     "pycocotools>=2.0.2",
-    "pypdf2",
+    "pypdf>=3.16.0",
+    "pypdfium2>=4.30.0",
     "python-prctl",
-    "pyyaml==6.0",
+    "pyyaml>=6.0.1",
     "pyzmq>=16",
+    "scipy>=1.13.1",
     "termcolor>=1.1",
     "tabulate>=0.7.7",
     "tqdm==4.64.0",
     # type-stubs
-    "types-PyYAML",
-    "types-termcolor==1.1.3",
-    "types-tabulate",
-    "types-tqdm",
-    "types-Pillow",
-    "types-urllib3",
-    "lxml-stubs",
+    "types-PyYAML>=6.0.12.12",
+    "types-termcolor>=1.1.3",
+    "types-tabulate>=0.9.0.3",
+    "types-tqdm>=4.66.0.5",
+    "types-Pillow>=10.2.0.20240406",
+    "types-urllib3>=1.26.25.14",
+    "lxml-stubs>=0.5.1",
     # Tensorflow related dependencies
     "protobuf==3.20.1",
-    "tensorpack",
+    "tensorpack==0.11",
     # PyTorch related dependencies
-    "timm",
-    "transformers",
+    "timm>=0.9.16",
+    "transformers>=4.36.0",
+    "accelerate>=0.29.1",
     # As maintenance of Detectron2 decreases, we will now use our own Fork the keep updating after rigorous testing.
     # This will hopefully prevent from issues like 233
     "detectron2 @ git+https://github.com/deepdoctection/detectron2.git",
     # other third party related dependencies (services or DL libraries). Must be installed by users
-    "jdeskew",
-    "boto3",
-    "pdfplumber>=0.7.1",
+    "jdeskew>=0.2.2",
+    "boto3==1.34.102",
+    "pdfplumber>=0.11.0",
     "tensorflow-addons>=0.17.1",
     "tf2onnx>=1.9.2",
-    "python-doctr==0.7.0",
-    "fasttext",
+    "python-doctr==0.8.1",
+    "fasttext==0.9.2",
     # dev dependencies
     "python-dotenv==1.0.0",
     "click",  # version will not break black
     "black==23.7.0",
-    "isort",
+    "isort==5.13.2",
     "pylint==2.17.4",
     "mypy==1.4.1",
     # docs
@@ -100,8 +104,9 @@ _DEPS = [
     "mkdocstrings-python",
     "griffe==0.25.0",
     # test
-    "pytest",
+    "pytest==8.0.2",
     "pytest-cov",
+    # other
     "wandb",
 ]
 
@@ -121,14 +126,17 @@ dist_deps = deps_list(
     "huggingface_hub",
     "importlib-metadata",
     "jsonlines",
+    "lazy-imports",
     "mock",
     "networkx",
     "numpy",
     "packaging",
     "Pillow",
-    "pypdf2",
+    "pypdf",
+    "pypdfium2",
     "pyyaml",
     "pyzmq",
+    "scipy",
     "termcolor",
     "tabulate",
     "tqdm",
@@ -150,7 +158,7 @@ additional_deps = deps_list(
 tf_deps = deps_list("tensorpack", "protobuf", "tensorflow-addons", "tf2onnx", "python-doctr", "pycocotools")
 
 # PyTorch dependencies
-pt_deps = deps_list("timm", "transformers", "python-doctr")
+pt_deps = deps_list("timm", "transformers", "accelerate", "python-doctr")
 
 source_pt_deps = pt_deps + deps_list("detectron2 @ git+https://github.com/deepdoctection/detectron2.git")
 
@@ -168,6 +176,7 @@ docs_deps = deps_list(
     "tensorpack",
     "boto3",
     "transformers",
+    "accelerate",
     "pdfplumber",
     "lxml",
     "lxml-stubs",
@@ -211,7 +220,6 @@ EXTRA_DEPS = {
     "docs": docs_deps,
     "dev": dev_deps,
     "test": test_deps,
-    "hf": pt_deps,
 }
 
 setup(
@@ -225,7 +233,7 @@ setup(
     long_description_content_type="text/markdown",
     install_requires=dist_deps,
     extras_require=EXTRA_DEPS,
-    packages=find_packages(),
+    packages=find_packages(exclude=["tests", "tests.*", "tests_d2"]),
     package_data={
         "deepdoctection.configs": ["*.yaml"],
         "deepdoctection.datasets.instances.xsl": ["*.xsl"],
@@ -237,8 +245,10 @@ setup(
         "License :: OSI Approved :: Apache Software License",
         "Natural Language :: English",
         "Operating System :: POSIX :: Linux",
-        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.9",
 )

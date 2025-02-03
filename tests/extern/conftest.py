@@ -18,15 +18,17 @@
 """
 Fixtures for extern package testing
 """
-from typing import List
+from typing import Mapping, Sequence
 
 from pytest import fixture
 
-from deepdoctection.utils.detection_types import JsonDict
+from deepdoctection.extern.base import DetectionResult
+from deepdoctection.utils.settings import ObjectTypes
+from deepdoctection.utils.types import JsonDict
 
 from ..data import get_textract_response
 from ..mapper.data import DatapointXfund
-from .data import PDF_BYTES, PDF_BYTES_2, get_detr_categories
+from .data import ANGLE_RESULT, PDF_BYTES, PDF_BYTES_2, get_detr_categories
 
 
 @fixture(name="layoutlm_input_for_predictor")
@@ -46,7 +48,7 @@ def fixture_layoutlm_input() -> JsonDict:
 
 
 @fixture(name="categories_semantics")
-def fixture_categories_semantics() -> List[str]:
+def fixture_categories_semantics() -> Sequence[str]:
     """
     Categories semantics
     """
@@ -54,7 +56,7 @@ def fixture_categories_semantics() -> List[str]:
 
 
 @fixture(name="categories_bio")
-def fixture_categories_bio() -> List[str]:
+def fixture_categories_bio() -> Sequence[str]:
     """
     Categories semantics
     """
@@ -62,7 +64,7 @@ def fixture_categories_bio() -> List[str]:
 
 
 @fixture(name="token_class_names")
-def fixture_token_class_names() -> List[str]:
+def fixture_token_class_names() -> Sequence[str]:
     """
     Categories semantics
     """
@@ -91,8 +93,16 @@ def fixture_pdf_bytes_page_2() -> bytes:
     return PDF_BYTES_2
 
 
+@fixture(name="angle_detection_result")
+def fixture_angle_detection_result() -> DetectionResult:
+    """
+    fixture detection result for running rotation image transformation
+    """
+    return ANGLE_RESULT
+
+
 @fixture(name="detr_categories")
-def fixture_detr_categories() -> JsonDict:
+def fixture_detr_categories() -> Mapping[int, ObjectTypes]:
     """
     fixture object types
     """

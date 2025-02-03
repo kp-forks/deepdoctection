@@ -18,13 +18,14 @@
 """
 Class AttrDict for maintaining configs and some functions for generating and saving AttrDict instances to .yaml files
 """
+from __future__ import annotations
 
 import pprint
-from typing import Any, Dict, List
+from typing import Any
 
 import yaml
 
-from .detection_types import Pathlike
+from .types import PathLikeOrStr
 
 
 # Copyright (c) Tensorpack Contributors
@@ -67,13 +68,13 @@ class AttrDict:
 
     __repr__ = __str__
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to a nested dict."""
         return {
             k: v.to_dict() if isinstance(v, AttrDict) else v for k, v in self.__dict__.items() if not k.startswith("_")
         }
 
-    def from_dict(self, d: Dict[str, Any]) -> None:  # pylint: disable=C0103
+    def from_dict(self, d: dict[str, Any]) -> None:  # pylint: disable=C0103
         """
         Generate an instance from a dict
         """
@@ -86,7 +87,7 @@ class AttrDict:
                 else:
                     setattr(self, k, v)
 
-    def update_args(self, args: List[str]) -> None:
+    def update_args(self, args: list[str]) -> None:
         """
         Update from command line args.
         """
@@ -105,6 +106,17 @@ class AttrDict:
                 v = eval(v)  # pylint: disable=C0103, W0123
             setattr(dic, key, v)
 
+    def overwrite_config(self, other_config: AttrDict) -> None:
+        """
+        Overwrite the current config with values from another config.
+
+        :param other_config: The other AttrDict instance to copy values from.
+        :raises AttributeError: If a key from other_config is not an attribute of self.
+        """
+        if self._freezed:
+            raise AttributeError("Config was freezed! Cannot overwrite config.")
+        self.from_dict(other_config.to_dict())
+
     def freeze(self, freezed: bool = True) -> None:
         """
         :param freezed: freeze the instance, so that no attributes can be added or changed
@@ -122,7 +134,7 @@ class AttrDict:
         raise NotImplementedError()
 
 
-def set_config_by_yaml(path_yaml: Pathlike) -> AttrDict:
+def set_config_by_yaml(path_yaml: PathLikeOrStr) -> AttrDict:
     """
     Use to initialize the config class for tensorpack faster rcnn
 
@@ -139,7 +151,7 @@ def set_config_by_yaml(path_yaml: Pathlike) -> AttrDict:
     return config
 
 
-def save_config_to_yaml(config: AttrDict, path_yaml: Pathlike) -> None:
+def save_config_to_yaml(config: AttrDict, path_yaml: PathLikeOrStr) -> None:
     """
     :param config: The configuration instance as an AttrDict
     :param path_yaml: Save the config class for tensorpack faster rcnn

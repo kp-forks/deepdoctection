@@ -2,10 +2,11 @@
 # File: __init__.py
 
 """
-Init file for deepdoctection package
+Init file for deepdoctection package. This file is used to import all submodules and to set some environment variables
 """
 
 import importlib.util
+import os
 
 # Before doing anything else, check if the .env file exists and load it
 if importlib.util.find_spec("dotenv") is not None:
@@ -15,22 +16,19 @@ if importlib.util.find_spec("dotenv") is not None:
 
 
 # pylint: disable=wrong-import-position
-import os
 import sys
 from typing import TYPE_CHECKING
 
-from packaging import version
-
-from .utils.env_info import auto_select_lib_and_device
+from .utils.env_info import auto_select_pdf_render_framework, collect_env_info
 from .utils.file_utils import _LazyModule, get_tf_version, pytorch_available, tf_available
-from .utils.logger import logger
+from .utils.logger import LoggingRecord, logger
 
 # pylint: enable=wrong-import-position
 
-__version__ = 0.27
+__version__ = "0.38"
 
 _IMPORT_STRUCTURE = {
-    "analyzer": ["get_dd_analyzer", "build_analyzer"],
+    "analyzer": ["config_sanity_checks", "get_dd_analyzer", "ServiceFactory"],
     "configs": [],
     "dataflow": [
         "DataFlowTerminated",
@@ -67,6 +65,7 @@ _IMPORT_STRUCTURE = {
     ],
     "datapoint": [
         "ann_from_dict",
+        "AnnotationMap",
         "Annotation",
         "CategoryAnnotation",
         "ImageAnnotation",
@@ -89,6 +88,7 @@ _IMPORT_STRUCTURE = {
         "convert_b64_to_np_array",
         "convert_np_array_to_b64",
         "convert_np_array_to_b64_b",
+        "convert_bytes_to_np_array",
         "convert_pdf_bytes_to_np_array_v2",
         "box_to_point4",
         "point4_to_box",
@@ -151,6 +151,8 @@ _IMPORT_STRUCTURE = {
         "EvalCallback",
     ],
     "extern": [
+        "ModelCategories",
+        "NerModelCategories",
         "PredictorBase",
         "DetectionResult",
         "ObjectDetector",
@@ -168,8 +170,10 @@ _IMPORT_STRUCTURE = {
         "Jdeskewer",
         "DoctrTextlineDetector",
         "DoctrTextRecognizer",
+        "DocTrRotationTransformer",
         "FasttextLangDetector",
         "HFDetrDerivedDetector",
+        "get_tokenizer_from_architecture",
         "HFLayoutLmTokenClassifierBase",
         "HFLayoutLmTokenClassifier",
         "HFLayoutLmv2TokenClassifier",
@@ -177,12 +181,17 @@ _IMPORT_STRUCTURE = {
         "HFLayoutLmSequenceClassifier",
         "HFLayoutLmv2SequenceClassifier",
         "HFLayoutLmv3SequenceClassifier",
+        "HFLiltTokenClassifier",
+        "HFLiltSequenceClassifier",
+        "HFLmSequenceClassifier",
         "ModelProfile",
         "ModelCatalog",
         "print_model_infos",
         "ModelDownloadManager",
         "PdfPlumberTextDetector",
+        "Pdfmium2TextDetector",
         "TesseractOcrDetector",
+        "TesseractRotationTransformer",
         "TextractOcrDetector",
         "TPFrcnnDetector",
     ],
@@ -220,6 +229,7 @@ _IMPORT_STRUCTURE = {
         "LabelSummarizer",
         "curry",
         "match_anns_by_intersection",
+        "match_anns_by_distance",
         "to_image",
         "maybe_load_image",
         "maybe_remove_image",
@@ -248,6 +258,8 @@ _IMPORT_STRUCTURE = {
         "DetectResultGenerator",
         "SubImageLayoutService",
         "ImageCroppingService",
+        "IntersectionMatcher",
+        "NeighbourMatcher",
         "MatchingService",
         "PageParsingService",
         "AnnotationNmsService",
@@ -255,11 +267,11 @@ _IMPORT_STRUCTURE = {
         "DoctectionPipe",
         "LanguageDetectionService",
         "ImageLayoutService",
-        "get_tokenizer_from_architecture",
         "LMTokenClassifierService",
         "LMSequenceClassifierService",
         "OrderGenerator",
         "TextLineGenerator",
+        "TextLineService",
         "TextOrderService",
         "TableSegmentationRefinementService",
         "generate_html_string",
@@ -268,7 +280,7 @@ _IMPORT_STRUCTURE = {
         "PubtablesSegmentationService",
         "SegmentationResult",
         "TextExtractionService",
-        "SimpleTransformPipelineComponent",
+        "SimpleTransformService",
     ],
     "train": [
         "D2Trainer",
@@ -284,14 +296,14 @@ _IMPORT_STRUCTURE = {
         "save_tmp_file",
         "timed_operation",
         "collect_env_info",
-        "get_device",
-        "auto_select_lib_and_device",
         "auto_select_viz_library",
+        "auto_select_pdf_render_framework",
         "get_tensorflow_requirement",
         "tf_addons_available",
         "get_tf_addons_requirements",
         "tensorpack_available",
         "get_tensorpack_requirement",
+        "pytorch_available",
         "get_pytorch_requirement",
         "lxml_available",
         "get_lxml_requirement",
@@ -332,6 +344,8 @@ _IMPORT_STRUCTURE = {
         "get_opencv_requirement",
         "pillow_available",
         "get_pillow_requirement",
+        "spacy_available",
+        "get_spacy_requirement",
         "load_image_from_file",
         "load_bytes_from_pdf_file",
         "get_load_image_func",
@@ -346,6 +360,7 @@ _IMPORT_STRUCTURE = {
         "get_configs_dir_path",
         "get_weights_dir_path",
         "get_dataset_dir_path",
+        "maybe_copy_config_to_cache",
         "is_uuid_like",
         "get_uuid_from_str",
         "get_uuid",
@@ -358,10 +373,12 @@ _IMPORT_STRUCTURE = {
         "save_config_to_yaml",
         "config_to_cli_str",
         "decrypt_pdf_document",
+        "decrypt_pdf_document_from_bytes",
         "get_pdf_file_reader",
         "get_pdf_file_writer",
         "PDFStreamer",
         "pdf_to_np_array",
+        "split_pdf",
         "ObjectTypes",
         "TypeOrStr",
         "object_types_registry",
@@ -403,36 +420,23 @@ _IMPORT_STRUCTURE = {
     ],
 }
 
-
-# disable TF warnings for versions > 2.4.1
-if tf_available():
-    if version.parse(get_tf_version()) > version.parse("2.4.1"):
-        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-    try:
-        import tensorflow.python.util.deprecation as deprecation  # type: ignore # pylint: disable=E0401,R0402
-
-        deprecation._PRINT_DEPRECATION_WARNINGS = False  # pylint: disable=W0212
-    except Exception:  # pylint: disable=W0703
-        try:
-            from tensorflow.python.util import deprecation  # type: ignore # pylint: disable=E0401
-
-            deprecation._PRINT_DEPRECATION_WARNINGS = False  # pylint: disable=W0212
-        except Exception:  # pylint: disable=W0703
-            pass
-
 # Setting some environment variables so that standard functions can be invoked with available hardware
-auto_select_lib_and_device()
-
+env_info = collect_env_info()
+logger.debug(LoggingRecord(msg=env_info))
+auto_select_pdf_render_framework()
+os.environ["DPI"] = "300"
+os.environ["IMAGE_WIDTH"] = ""
+os.environ["IMAGE_HEIGHT"] = ""
 
 # Direct imports for type-checking
 if TYPE_CHECKING:
     from .analyzer import *
     from .dataflow import *
     from .datapoint import *
-    from .datasets import *
+    from .datasets import *  # type: ignore
     from .eval import *
-    from .extern import *
-    from .mapper import *
+    from .extern import *  # type: ignore
+    from .mapper import *  # type: ignore
     from .pipe import *
     from .train import *
     from .utils import *

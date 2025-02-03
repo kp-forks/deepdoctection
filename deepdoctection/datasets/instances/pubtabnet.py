@@ -27,17 +27,18 @@ Module for Pubtabnet dataset. Place the dataset as follows
     │ ├── PMC3.png
     ├── PubTabNet_2.0.0.jsonl
 """
+from __future__ import annotations
 
-from typing import Dict, List, Mapping, Union
+from typing import Mapping, Union
 
 from ...dataflow import DataFlow, MapData
 from ...dataflow.custom_serialize import SerializerJsonlines
 from ...datasets.info import DatasetInfo
 from ...mapper.cats import cat_to_sub_cat, filter_cat
 from ...mapper.pubstruct import pub_to_image
-from ...utils.detection_types import JsonDict
-from ...utils.logger import logger
+from ...utils.logger import LoggingRecord, logger
 from ...utils.settings import CellType, DatasetType, LayoutType, ObjectTypes, TableType, WordType
+from ...utils.types import PubtabnetDict
 from ..base import _BuiltInDataset
 from ..dataflow_builder import DataFlowBaseBuilder
 from ..info import DatasetCategories
@@ -69,38 +70,38 @@ _URL = (
     "pubtabnet.tar.gz?_ga=2.267291150.146828643.1629125962-1173244232.1625045842"
 )
 _SPLITS: Mapping[str, str] = {"train": "train", "val": "val", "test": "test"}
-_TYPE = DatasetType.object_detection
+_TYPE = DatasetType.OBJECT_DETECTION
 _LOCATION = "pubtabnet"
 _ANNOTATION_FILES: Mapping[str, str] = {"all": "PubTabNet_2.0.0.jsonl"}
 
-_INIT_CATEGORIES = [LayoutType.cell, TableType.item, LayoutType.table, LayoutType.word]
-_SUB_CATEGORIES: Dict[ObjectTypes, Dict[ObjectTypes, List[ObjectTypes]]]
+_INIT_CATEGORIES = [LayoutType.CELL, TableType.ITEM, LayoutType.TABLE, LayoutType.WORD]
+_SUB_CATEGORIES: dict[ObjectTypes, dict[ObjectTypes, list[ObjectTypes]]]
 _SUB_CATEGORIES = {
-    TableType.item: {TableType.item: [LayoutType.row, LayoutType.column]},
-    LayoutType.cell: {
-        CellType.header: [CellType.header, CellType.body],
-        CellType.row_number: [],
-        CellType.column_number: [],
-        CellType.row_span: [],
-        CellType.column_span: [],
-        CellType.spanning: [CellType.spanning],
+    TableType.ITEM: {TableType.ITEM: [LayoutType.ROW, LayoutType.COLUMN]},
+    LayoutType.CELL: {
+        CellType.HEADER: [CellType.HEADER, CellType.BODY],
+        CellType.ROW_NUMBER: [],
+        CellType.COLUMN_NUMBER: [],
+        CellType.ROW_SPAN: [],
+        CellType.COLUMN_SPAN: [],
+        CellType.SPANNING: [CellType.SPANNING],
     },
-    CellType.header: {
-        CellType.row_number: [],
-        CellType.column_number: [],
-        CellType.row_span: [],
-        CellType.column_span: [],
-        CellType.spanning: [CellType.spanning],
+    CellType.HEADER: {
+        CellType.ROW_NUMBER: [],
+        CellType.COLUMN_NUMBER: [],
+        CellType.ROW_SPAN: [],
+        CellType.COLUMN_SPAN: [],
+        CellType.SPANNING: [CellType.SPANNING],
     },
-    CellType.body: {
-        CellType.row_number: [],
-        CellType.column_number: [],
-        CellType.row_span: [],
-        CellType.column_span: [],
-        CellType.spanning: [CellType.spanning],
+    CellType.BODY: {
+        CellType.ROW_NUMBER: [],
+        CellType.COLUMN_NUMBER: [],
+        CellType.ROW_SPAN: [],
+        CellType.COLUMN_SPAN: [],
+        CellType.SPANNING: [CellType.SPANNING],
     },
-    LayoutType.table: {TableType.html: [TableType.html]},
-    LayoutType.word: {WordType.characters: [WordType.characters]},
+    LayoutType.TABLE: {TableType.HTML: [TableType.HTML]},
+    LayoutType.WORD: {WordType.CHARACTERS: [WordType.CHARACTERS]},
 }
 
 
@@ -119,7 +120,7 @@ class Pubtabnet(_BuiltInDataset):
     def _categories(self) -> DatasetCategories:
         return DatasetCategories(init_categories=_INIT_CATEGORIES, init_sub_categories=_SUB_CATEGORIES)
 
-    def _builder(self) -> "PubtabnetBuilder":
+    def _builder(self) -> PubtabnetBuilder:
         return PubtabnetBuilder(location=_LOCATION, annotation_files=_ANNOTATION_FILES)
 
 
@@ -150,7 +151,7 @@ class PubtabnetBuilder(DataFlowBaseBuilder):
         """
         split = str(kwargs.get("split", "val"))
         if split == "val":
-            logger.info("Loading annotations for 'val' split from Pubtabnet will take some time.")
+            logger.info(LoggingRecord("Loading annotations for 'val' split from Pubtabnet will take some time."))
         max_datapoints = kwargs.get("max_datapoints")
         if max_datapoints is not None:
             max_datapoints = int(max_datapoints)
@@ -160,7 +161,7 @@ class PubtabnetBuilder(DataFlowBaseBuilder):
         fake_score = kwargs.get("fake_score", False)
         dd_pipe_like = kwargs.get("dd_pipe_like", False)
         if dd_pipe_like:
-            logger.info("When 'dd_pipe_like'=True will set 'load_image'=True")
+            logger.info(LoggingRecord("When 'dd_pipe_like'=True will set 'load_image'=True"))
             load_image = True
 
         # Load
@@ -169,7 +170,7 @@ class PubtabnetBuilder(DataFlowBaseBuilder):
         df = SerializerJsonlines.load(path, max_datapoints=max_datapoints)
 
         # Map
-        def replace_filename(dp: JsonDict) -> JsonDict:
+        def replace_filename(dp: PubtabnetDict) -> PubtabnetDict:
             dp["filename"] = self.get_workdir() / dp["split"] / dp["filename"]
             return dp
 
@@ -177,7 +178,7 @@ class PubtabnetBuilder(DataFlowBaseBuilder):
         df = MapData(df, lambda dp: dp if dp["split"] == split else None)
         pub_mapper = pub_to_image(
             self.categories.get_categories(name_as_key=True, init=True),
-            load_image,
+            load_image=load_image,
             fake_score=fake_score,
             rows_and_cols=rows_and_cols,
             dd_pipe_like=dd_pipe_like,
@@ -186,6 +187,7 @@ class PubtabnetBuilder(DataFlowBaseBuilder):
         )
 
         df = MapData(df, pub_mapper)
+
         if self.categories.is_cat_to_sub_cat():
             df = MapData(
                 df,

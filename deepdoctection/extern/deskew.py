@@ -18,16 +18,18 @@
 """
 jdeskew estimator and rotator to deskew images: <https://github.com/phamquiluan/jdeskew>
 """
+from __future__ import annotations
 
-from typing import List
+from lazy_imports import try_import
 
-from ..utils.detection_types import ImageType, Requirement
-from ..utils.file_utils import get_jdeskew_requirement, jdeskew_available
-from .base import ImageTransformer
+from ..utils.file_utils import get_jdeskew_requirement
+from ..utils.settings import ObjectTypes, PageType
+from ..utils.types import PixelValues, Requirement
+from ..utils.viz import viz_handler
+from .base import DetectionResult, ImageTransformer
 
-if jdeskew_available():
+with try_import() as import_guard:
     from jdeskew.estimator import get_angle
-    from jdeskew.utility import rotate
 
 
 class Jdeskewer(ImageTransformer):
@@ -37,19 +39,45 @@ class Jdeskewer(ImageTransformer):
     """
 
     def __init__(self, min_angle_rotation: float = 2.0):
-        self.name = "jdeskew_transform"
+        self.name = "jdeskewer"
+        self.model_id = self.get_model_id()
         self.min_angle_rotation = min_angle_rotation
 
-    def transform(self, np_img: ImageType) -> ImageType:
-        angle = get_angle(np_img)
+    def transform(self, np_img: PixelValues, specification: DetectionResult) -> PixelValues:
+        """
+        Rotation of the image according to the angle determined by the jdeskew estimator.
 
-        if angle > self.min_angle_rotation:
-            return rotate(np_img, angle)
+        **Example**:
+                    jdeskew_predictor = Jdeskewer()
+                    detection_result = jdeskew_predictor.predict(np_image)
+                    jdeskew_predictor.transform(np_image, DetectionResult(angle=5.0))
+
+        :param np_img: image as numpy array
+        :param specification: DetectionResult with angle value
+        :return: image rotated by the angle
+        """
+        if abs(specification.angle) > self.min_angle_rotation:  # type: ignore
+            return viz_handler.rotate_image(np_img, specification.angle)  # type: ignore
         return np_img
 
+    def predict(self, np_img: PixelValues) -> DetectionResult:
+        """
+        Predict the angle of the image to deskew it.
+
+        :param np_img: image as numpy array
+        :return: DetectionResult with angle value
+        """
+        return DetectionResult(angle=round(float(get_angle(np_img)), 4))
+
     @classmethod
-    def get_requirements(cls) -> List[Requirement]:
+    def get_requirements(cls) -> list[Requirement]:
         """
         Get a list of requirements for running the detector
         """
         return [get_jdeskew_requirement()]
+
+    def clone(self) -> Jdeskewer:
+        return self.__class__(self.min_angle_rotation)
+
+    def get_category_names(self) -> tuple[ObjectTypes, ...]:
+        return (PageType.ANGLE,)

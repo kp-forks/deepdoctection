@@ -24,6 +24,7 @@ Module for Testlayout dataset. Install the dataset following the folder structur
     ├── test
     │ ├── xrf_layout_test.jsonl
 """
+from __future__ import annotations
 
 from typing import Mapping, Union
 
@@ -49,14 +50,9 @@ _LICENSE = (
     " – Permissive – Version 1.0 License. Dr. Janis Meyer does not own the copyright of the images. \n"
     " Use of the images must abide by the PMC Open Access Subset Terms of Use."
 )
-_URL = [
-    "https://www.googleapis.com/drive/v3/files/1ZD4Ef4gd2FIfp7vR8jbnrZeXD3gSWNqE?alt"
-    "=media&key=AIzaSyDuoPG6naK-kRJikScR7cP_1sQBF1r3fWU",
-    "https://www.googleapis.com/drive/v3/files/18HD62LFLa1iAmqffo4SyjuEQ32MzyNQ0?alt"
-    "=media&key=AIzaSyDuoPG6naK-kRJikScR7cP_1sQBF1r3fWU",
-]
+
 _SPLITS: Mapping[str, str] = {"test": "test", "predict": "predict"}
-_TYPE = DatasetType.object_detection
+_TYPE = DatasetType.OBJECT_DETECTION
 _LOCATION = "testlayout"
 
 _ANNOTATION_FILES: Mapping[str, str] = {
@@ -64,7 +60,7 @@ _ANNOTATION_FILES: Mapping[str, str] = {
     "predict": "xrf_layout_test_predict.jsonl",
 }
 
-_INIT_CATEGORIES = [LayoutType.text, LayoutType.title, LayoutType.list, LayoutType.table, LayoutType.figure]
+_INIT_CATEGORIES = [LayoutType.TEXT, LayoutType.TITLE, LayoutType.LIST, LayoutType.TABLE, LayoutType.FIGURE]
 
 
 @dataset_registry.register("testlayout")
@@ -77,12 +73,12 @@ class LayoutTest(_BuiltInDataset):
 
     @classmethod
     def _info(cls) -> DatasetInfo:
-        return DatasetInfo(name=_NAME, description=_DESCRIPTION, license=_LICENSE, url=_URL, splits=_SPLITS, type=_TYPE)
+        return DatasetInfo(name=_NAME, description=_DESCRIPTION, license=_LICENSE, splits=_SPLITS, type=_TYPE)
 
     def _categories(self) -> DatasetCategories:
         return DatasetCategories(init_categories=_INIT_CATEGORIES)
 
-    def _builder(self) -> "LayoutTestBuilder":
+    def _builder(self) -> LayoutTestBuilder:
         return LayoutTestBuilder(location=_LOCATION, annotation_files=_ANNOTATION_FILES)
 
 

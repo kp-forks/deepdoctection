@@ -19,11 +19,11 @@
 Module for datapoint populating helpers
 """
 from dataclasses import asdict
-from typing import Dict, List, Mapping, Optional, Union
+from typing import Mapping, Optional, Union
 
 import numpy as np
 
-from ..datapoint.annotation import CategoryAnnotation, ContainerAnnotation, ImageAnnotation, SummaryAnnotation
+from ..datapoint.annotation import DEFAULT_CATEGORY_ID, CategoryAnnotation, ContainerAnnotation, ImageAnnotation
 from ..datapoint.box import BoundingBox, local_to_global_coords, rescale_coords
 from ..datapoint.image import Image
 from ..extern.base import DetectionResult
@@ -42,11 +42,14 @@ class DatapointManager:
     The manager is part of each `PipelineComponent`.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, service_id: str, model_id: Optional[str] = None) -> None:
         self._datapoint: Optional[Image] = None
-        self._cache_anns: Dict[str, ImageAnnotation] = {}
+        self._cache_anns: dict[str, ImageAnnotation] = {}
         self.datapoint_is_passed: bool = False
         self.category_id_mapping: Optional[Mapping[int, int]] = None
+        self.service_id = service_id
+        self.model_id = model_id
+        self.session_id: Optional[str] = None
 
     @property
     def datapoint(self) -> Image:
@@ -55,7 +58,7 @@ class DatapointManager:
         """
         if self._datapoint is not None:
             return self._datapoint
-        raise ValueError("no datapoint passed")
+        raise ValueError("No datapoint passed")
 
     @datapoint.setter
     def datapoint(self, dp: Image) -> None:
@@ -152,8 +155,11 @@ class DatapointManager:
             ann = ImageAnnotation(
                 category_name=detect_result.class_name,
                 bounding_box=box,
-                category_id=str(detect_result.class_id),
+                category_id=detect_result.class_id,
                 score=detect_result.score,
+                service_id=self.service_id,
+                model_id=self.model_id,
+                session_id=self.session_id,
             )
             if to_annotation_id is not None:
                 parent_ann = self._cache_anns[to_annotation_id]
@@ -168,7 +174,7 @@ class DatapointManager:
                     raise ValueError("image cannot be None")
                 ann.image.set_embedding(parent_ann.annotation_id, ann.bounding_box)
                 ann.image.set_embedding(self.datapoint.image_id, ann_global_box)
-                parent_ann.dump_relationship(Relationships.child, ann.annotation_id)
+                parent_ann.dump_relationship(Relationships.CHILD, ann.annotation_id)
 
             self.datapoint.dump(ann)
             self._cache_anns[ann.annotation_id] = ann
@@ -183,7 +189,7 @@ class DatapointManager:
     def set_category_annotation(
         self,
         category_name: ObjectTypes,
-        category_id: Optional[Union[str, int]],
+        category_id: Optional[int],
         sub_cat_key: ObjectTypes,
         annotation_id: str,
         score: Optional[float] = None,
@@ -208,7 +214,14 @@ class DatapointManager:
                 "annotation_id": annotation_id,
             },
         ) as annotation_context:
-            cat_ann = CategoryAnnotation(category_name=category_name, category_id=str(category_id), score=score)
+            cat_ann = CategoryAnnotation(
+                category_name=category_name,
+                category_id=category_id if category_id is not None else DEFAULT_CATEGORY_ID,
+                score=score,
+                service_id=self.service_id,
+                model_id=self.model_id,
+                session_id=self.session_id,
+            )
             self._cache_anns[annotation_id].dump_sub_category(sub_cat_key, cat_ann)
         if annotation_context.context_error:
             return None
@@ -217,10 +230,10 @@ class DatapointManager:
     def set_container_annotation(
         self,
         category_name: ObjectTypes,
-        category_id: Optional[Union[str, int]],
+        category_id: Optional[int],
         sub_cat_key: ObjectTypes,
         annotation_id: str,
-        value: Union[str, List[str]],
+        value: Union[str, list[str]],
         score: Optional[float] = None,
     ) -> Optional[str]:
         """
@@ -246,18 +259,51 @@ class DatapointManager:
             },
         ) as annotation_context:
             cont_ann = ContainerAnnotation(
-                category_name=category_name, category_id=str(category_id), value=value, score=score
+                category_name=category_name,
+                category_id=category_id if category_id is not None else DEFAULT_CATEGORY_ID,
+                value=value,
+                score=score,
+                service_id=self.service_id,
+                model_id=self.model_id,
+                session_id=self.session_id,
             )
             self._cache_anns[annotation_id].dump_sub_category(sub_cat_key, cont_ann)
         if annotation_context.context_error:
             return None
         return cont_ann.annotation_id
 
+    def set_relationship_annotation(
+        self, relationship_name: ObjectTypes, target_annotation_id: str, annotation_id: str
+    ) -> Optional[str]:
+        """
+        Create a relationship annotation and dump it to the target annotation.
+
+        :param relationship_name: The relationship key
+        :param target_annotation_id: Annotation_id of the parent `ImageAnnotation`
+        :param annotation_id: The annotation_id to dump the relationship to
+
+        :return: Annotation_id of the parent `ImageAnnotation` for references if the dumpy has been successful
+        """
+        self.assert_datapoint_passed()
+        with MappingContextManager(
+            dp_name=self.datapoint.file_name,
+            filter_level="annotation",
+            relationship_annotation={
+                "relationship_name": relationship_name.value,
+                "target_annotation_id": target_annotation_id,
+                "annotation_id": annotation_id,
+            },
+        ) as annotation_context:
+            self._cache_anns[target_annotation_id].dump_relationship(relationship_name, annotation_id)
+        if annotation_context.context_error:
+            return None
+        return target_annotation_id
+
     def set_summary_annotation(
         self,
         summary_key: ObjectTypes,
         summary_name: ObjectTypes,
-        summary_number: int,
+        summary_number: Optional[int] = None,
         summary_value: Optional[str] = None,
         summary_score: Optional[float] = None,
         annotation_id: Optional[str] = None,
@@ -280,8 +326,6 @@ class DatapointManager:
         else:
             image = self.datapoint
         assert image is not None, image
-        if image.summary is None:
-            image.summary = SummaryAnnotation()
 
         ann: Union[CategoryAnnotation, ContainerAnnotation]
         with MappingContextManager(
@@ -294,16 +338,24 @@ class DatapointManager:
                 "annotation_id": annotation_id,
             },
         ) as annotation_context:
-            if summary_value:
+            if summary_value is not None:
                 ann = ContainerAnnotation(
                     category_name=summary_name,
-                    category_id=str(summary_number),
+                    category_id=summary_number if summary_number else DEFAULT_CATEGORY_ID,
                     value=summary_value,
                     score=summary_score,
+                    service_id=self.service_id,
+                    model_id=self.model_id,
+                    session_id=self.session_id,
                 )
             else:
                 ann = CategoryAnnotation(
-                    category_name=summary_name, category_id=str(summary_number), score=summary_score
+                    category_name=summary_name,
+                    category_id=summary_number if summary_number is not None else DEFAULT_CATEGORY_ID,
+                    score=summary_score,
+                    service_id=self.service_id,
+                    model_id=self.model_id,
+                    session_id=self.session_id,
                 )
             image.summary.dump_sub_category(summary_key, ann, image.image_id)
 

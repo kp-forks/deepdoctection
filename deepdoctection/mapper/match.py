@@ -19,10 +19,11 @@
 Module for matching detections according to various matching rules
 """
 
-from typing import Any, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, Literal, Optional, Sequence, Union
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.spatial import distance
 
 from ..datapoint.annotation import ImageAnnotation
 from ..datapoint.box import iou
@@ -41,7 +42,7 @@ def match_anns_by_intersection(
     parent_ann_ids: Optional[Union[Sequence[str], str]] = None,
     child_ann_ids: Optional[Union[str, Sequence[str]]] = None,
     max_parent_only: bool = False,
-) -> Tuple[Any, Any, Sequence[ImageAnnotation], Sequence[ImageAnnotation]]:
+) -> tuple[Any, Any, Sequence[ImageAnnotation], Sequence[ImageAnnotation]]:
     """
     Generates an iou/ioa-matrix for parent_ann_categories and child_ann_categories and returns pairs of child/parent
     indices that are above some intersection threshold. It will also return a list of all pre selected parent and child
@@ -100,17 +101,6 @@ def match_anns_by_intersection(
         ]
     )
 
-    # second try, if ann has empty image
-    n_dim = child_ann_boxes.ndim
-    if n_dim != 2:
-        child_ann_boxes = np.array(
-            [
-                ann.bounding_box.transform(dp.width, dp.height, absolute_coords=True).to_list(mode="xyxy")
-                for ann in child_anns
-                if ann.bounding_box is not None
-            ]
-        )
-
     parent_anns = dp.get_annotation(annotation_ids=parent_ann_ids, category_names=parent_ann_category_names)
     parent_ann_boxes = np.array(
         [
@@ -118,17 +108,6 @@ def match_anns_by_intersection(
             for ann in parent_anns
         ]
     )
-
-    # same for parent
-    n_dim = parent_ann_boxes.ndim
-    if n_dim != 2:
-        parent_ann_boxes = np.array(
-            [
-                ann.bounding_box.transform(dp.width, dp.height, absolute_coords=True).to_list(mode="xyxy")
-                for ann in parent_anns
-                if ann.bounding_box is not None
-            ]
-        )
 
     if matching_rule in ["iou"] and parent_anns and child_anns:
         iou_matrix = iou(child_ann_boxes, parent_ann_boxes)
@@ -164,3 +143,35 @@ def match_anns_by_intersection(
         return [], [], [], []
 
     return child_index, parent_index, child_anns, parent_anns
+
+
+def match_anns_by_distance(
+    dp: Image,
+    parent_ann_category_names: Union[TypeOrStr, Sequence[TypeOrStr]],
+    child_ann_category_names: Union[TypeOrStr, Sequence[TypeOrStr]],
+    parent_ann_ids: Optional[Union[Sequence[str], str]] = None,
+    child_ann_ids: Optional[Union[str, Sequence[str]]] = None,
+) -> list[tuple[ImageAnnotation, ImageAnnotation]]:
+    """
+    Generates pairs of parent and child annotations by calculating the euclidean distance between the centers of the
+    parent and child bounding boxes. It will return the closest child for each parent. Note, that a child can be
+    assigned multiple times to different parents.
+
+    :param dp: image datapoint
+    :param parent_ann_category_names: single str or list of category names
+    :param child_ann_category_names: single str or list of category names
+    :param parent_ann_ids: Additional filter condition. If some ids are selected, it will ignore all other parent candi-
+                           dates which are not in the list.
+    :param child_ann_ids: Additional filter condition. If some ids are selected, it will ignore all other children
+                          candidates which are not in the list.
+    :return:
+    """
+
+    parent_anns = dp.get_annotation(annotation_ids=parent_ann_ids, category_names=parent_ann_category_names)
+    child_anns = dp.get_annotation(annotation_ids=child_ann_ids, category_names=child_ann_category_names)
+    child_centers = [block.get_bounding_box(dp.image_id).center for block in child_anns]
+    parent_centers = [block.get_bounding_box(dp.image_id).center for block in parent_anns]
+    if child_centers and parent_centers:
+        child_indices = distance.cdist(parent_centers, child_centers).argmin(axis=1)
+        return [(parent_anns[i], child_anns[j]) for i, j in enumerate(child_indices)]
+    return []

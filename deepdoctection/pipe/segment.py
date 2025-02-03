@@ -20,21 +20,22 @@ Module for pipeline component of table segmentation. Uses row/column detector an
 ious/ioas of rows and columns.
 """
 
+from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Literal, Optional, Sequence, Tuple, Union
+from typing import Literal, Optional, Sequence, Union
 
 import numpy as np
 
 from ..datapoint.annotation import ImageAnnotation
-from ..datapoint.box import BoundingBox, global_to_local_coords, intersection_boxes, iou
+from ..datapoint.box import BoundingBox, global_to_local_coords, intersection_box, intersection_boxes, iou, merge_boxes
 from ..datapoint.image import Image
 from ..extern.base import DetectionResult
 from ..mapper.maputils import MappingContextManager
 from ..mapper.match import match_anns_by_intersection
-from ..utils.detection_types import JsonDict
-from ..utils.settings import CellType, LayoutType, ObjectTypes, Relationships, TableType
-from .base import PipelineComponent
+from ..utils.error import ImageError
+from ..utils.settings import CellType, LayoutType, ObjectTypes, Relationships, TableType, TypeOrStr, get_type
+from .base import MetaAnnotation, PipelineComponent
 from .refine import generate_html_string
 from .registry import pipeline_component_registry
 
@@ -54,12 +55,21 @@ class SegmentationResult:
     cs: int
 
 
+@dataclass
+class ItemHeaderResult:
+    """
+    Simple mutable storage for item header results
+    """
+
+    annotation_id: str
+
+
 def choose_items_by_iou(
     dp: Image,
-    item_proposals: List[ImageAnnotation],
+    item_proposals: list[ImageAnnotation],
     iou_threshold: float,
     above_threshold: bool = True,
-    reference_item_proposals: Optional[List[ImageAnnotation]] = None,
+    reference_item_proposals: Optional[list[ImageAnnotation]] = None,
 ) -> Image:
     """
     Deactivate image annotations that have ious with each other above some threshold. It will deactivate an annotation
@@ -74,6 +84,8 @@ def choose_items_by_iou(
     :param reference_item_proposals: Annotations as reference. If provided, it will compare `item_proposals` with
                                      `reference_item_proposals`
     """
+    if len(item_proposals) <= 1:  # we want to ensure to have at least one element.
+        return dp
     item_proposals_boxes = np.array(
         [item.get_bounding_box(dp.image_id).to_list(mode="xyxy") for item in item_proposals]
     )
@@ -130,16 +142,16 @@ def stretch_item_per_table(
     :return: Image
     """
 
-    item_ann_ids = table.get_relationship(Relationships.child)
+    item_ann_ids = table.get_relationship(Relationships.CHILD)
 
     rows = dp.get_annotation(category_names=row_name, annotation_ids=item_ann_ids)
     if table.image is None:
-        raise ValueError("table.image cannot be None")
+        raise ImageError("table.image cannot be None")
     table_embedding_box = table.get_bounding_box(dp.image_id)
 
     for row in rows:
         if row.image is None:
-            raise ValueError("row.image cannot be None")
+            raise ImageError("row.image cannot be None")
         row_embedding_box = row.get_bounding_box(dp.image_id)
         row_embedding_box.ulx = table_embedding_box.ulx + 1.0
         row_embedding_box.lrx = table_embedding_box.lrx - 1.0
@@ -164,7 +176,7 @@ def stretch_item_per_table(
 
     for col in cols:
         if col.image is None:
-            raise ValueError("row.image cannot be None")
+            raise ImageError("row.image cannot be None")
         col_embedding_box = col.get_bounding_box(dp.image_id)
         col_embedding_box.uly = table_embedding_box.uly + 1.0
         col_embedding_box.lry = table_embedding_box.lry - 1.0
@@ -189,13 +201,13 @@ def stretch_item_per_table(
 
 
 def _tile_by_stretching_rows_left_and_rightwise(
-    dp: Image, items: List[ImageAnnotation], table: ImageAnnotation, item_name: str
+    dp: Image, items: list[ImageAnnotation], table: ImageAnnotation, item_name: str
 ) -> None:
     if table.image is None:
-        raise ValueError("table.image cannot be None")
+        raise ImageError("table.image cannot be None")
     table_embedding_box = table.get_bounding_box(dp.image_id)
 
-    tmp_item_xy = table_embedding_box.uly + 1.0 if item_name == LayoutType.row else table_embedding_box.ulx + 1.0
+    tmp_item_xy = table_embedding_box.uly + 1.0 if item_name == LayoutType.ROW else table_embedding_box.ulx + 1.0
     tmp_item_table_xy = 1.0
     for idx, item in enumerate(items):
         with MappingContextManager(
@@ -204,25 +216,25 @@ def _tile_by_stretching_rows_left_and_rightwise(
             image_annotation={"category_name": item.category_name, "annotation_id": item.annotation_id},
         ):
             if item.image is None:
-                raise ValueError("item.image cannot be None")
+                raise ImageError("item.image cannot be None")
             item_embedding_box = item.get_bounding_box(dp.image_id)
             if idx != len(items) - 1:
                 next_item_embedding_box = items[idx + 1].get_bounding_box(dp.image_id)
                 tmp_next_item_xy = (
                     (item_embedding_box.lry + next_item_embedding_box.uly) / 2
-                    if item_name == LayoutType.row
+                    if item_name == LayoutType.ROW
                     else (item_embedding_box.lrx + next_item_embedding_box.ulx) / 2
                 )
             else:
                 tmp_next_item_xy = (
-                    table_embedding_box.lry - 1.0 if item_name == LayoutType.row else table_embedding_box.lrx - 1.0
+                    table_embedding_box.lry - 1.0 if item_name == LayoutType.ROW else table_embedding_box.lrx - 1.0
                 )
 
             new_embedding_box = BoundingBox(
-                ulx=item_embedding_box.ulx if item_name == LayoutType.row else tmp_item_xy,
-                uly=tmp_item_xy if item_name == LayoutType.row else item_embedding_box.uly,
-                lrx=item_embedding_box.lrx if item_name == LayoutType.row else tmp_next_item_xy,
-                lry=tmp_next_item_xy if item_name == LayoutType.row else item_embedding_box.lry,
+                ulx=item_embedding_box.ulx if item_name == LayoutType.ROW else tmp_item_xy,
+                uly=tmp_item_xy if item_name == LayoutType.ROW else item_embedding_box.uly,
+                lrx=item_embedding_box.lrx if item_name == LayoutType.ROW else tmp_next_item_xy,
+                lry=tmp_next_item_xy if item_name == LayoutType.ROW else item_embedding_box.lry,
                 absolute_coords=True,
             )
             item.image.set_embedding(dp.image_id, new_embedding_box)
@@ -233,19 +245,19 @@ def _tile_by_stretching_rows_left_and_rightwise(
                 next_item_table_embedding_box = items[idx + 1].get_bounding_box(table.annotation_id)
                 tmp_table_next_item_xy = (
                     (item_table_embedding_box.lry + next_item_table_embedding_box.uly) / 2
-                    if item_name == LayoutType.row
+                    if item_name == LayoutType.ROW
                     else (item_table_embedding_box.lrx + next_item_table_embedding_box.ulx) / 2
                 )
             else:
                 tmp_table_next_item_xy = (
-                    table.image.height - 1.0 if item_name == LayoutType.row else table.image.width - 1.0
+                    table.image.height - 1.0 if item_name == LayoutType.ROW else table.image.width - 1.0
                 )
 
             new_table_embedding_box = BoundingBox(
-                ulx=item_table_embedding_box.ulx if item_name == LayoutType.row else tmp_item_table_xy,
-                uly=tmp_item_table_xy if item_name == LayoutType.row else item_table_embedding_box.uly,
-                lrx=item_table_embedding_box.lrx if item_name == LayoutType.row else tmp_table_next_item_xy,
-                lry=tmp_table_next_item_xy if item_name == LayoutType.row else item_table_embedding_box.lry,
+                ulx=item_table_embedding_box.ulx if item_name == LayoutType.ROW else tmp_item_table_xy,
+                uly=tmp_item_table_xy if item_name == LayoutType.ROW else item_table_embedding_box.uly,
+                lrx=item_table_embedding_box.lrx if item_name == LayoutType.ROW else tmp_table_next_item_xy,
+                lry=tmp_table_next_item_xy if item_name == LayoutType.ROW else item_table_embedding_box.lry,
                 absolute_coords=True,
             )
             item.image.set_embedding(table.annotation_id, new_table_embedding_box)
@@ -253,13 +265,13 @@ def _tile_by_stretching_rows_left_and_rightwise(
 
 
 def _tile_by_stretching_rows_leftwise_column_downwise(
-    dp: Image, items: List[ImageAnnotation], table: ImageAnnotation, item_name: str
+    dp: Image, items: list[ImageAnnotation], table: ImageAnnotation, item_name: str
 ) -> None:
     if table.image is None:
-        raise ValueError("table.image cannot be None")
+        raise ImageError("table.image cannot be None")
     table_embedding_box = table.get_bounding_box(dp.image_id)
 
-    tmp_item_xy = table_embedding_box.uly + 1.0 if item_name == LayoutType.row else table_embedding_box.ulx + 1.0
+    tmp_item_xy = table_embedding_box.uly + 1.0 if item_name == LayoutType.ROW else table_embedding_box.ulx + 1.0
     tmp_item_table_xy = 1.0
     for item in items:
         with MappingContextManager(
@@ -268,19 +280,19 @@ def _tile_by_stretching_rows_leftwise_column_downwise(
             image_annotation={"category_name": item.category_name, "annotation_id": item.annotation_id},
         ):
             if item.image is None:
-                raise ValueError("item.image cannot be None")
+                raise ImageError("item.image cannot be None")
             item_embedding_box = item.get_bounding_box(dp.image_id)
             new_embedding_box = BoundingBox(
-                ulx=item_embedding_box.ulx if item_name == LayoutType.row else tmp_item_xy,
-                uly=tmp_item_xy if item_name == LayoutType.row else item_embedding_box.uly,
+                ulx=item_embedding_box.ulx if item_name == LayoutType.ROW else tmp_item_xy,
+                uly=tmp_item_xy if item_name == LayoutType.ROW else item_embedding_box.uly,
                 lrx=item_embedding_box.lrx,
                 lry=item_embedding_box.lry,
                 absolute_coords=True,
             )
             item_table_embedding_box = item.get_bounding_box(table.annotation_id)
             new_table_embedding_box = BoundingBox(
-                ulx=item_table_embedding_box.ulx if item_name == LayoutType.row else tmp_item_table_xy,
-                uly=tmp_item_table_xy if item_name == LayoutType.row else item_table_embedding_box.uly,
+                ulx=item_table_embedding_box.ulx if item_name == LayoutType.ROW else tmp_item_table_xy,
+                uly=tmp_item_table_xy if item_name == LayoutType.ROW else item_table_embedding_box.uly,
                 lrx=item_table_embedding_box.lrx,
                 lry=item_table_embedding_box.lry,
                 absolute_coords=True,
@@ -288,30 +300,30 @@ def _tile_by_stretching_rows_leftwise_column_downwise(
 
             if item == items[-1]:
                 new_embedding_box = BoundingBox(
-                    ulx=item_embedding_box.ulx if item_name == LayoutType.row else tmp_item_xy,
-                    uly=tmp_item_xy if item_name == LayoutType.row else item_embedding_box.uly,
-                    lrx=item_embedding_box.lrx if item_name == LayoutType.row else table_embedding_box.lrx - 1.0,
-                    lry=table_embedding_box.lry - 1.0 if item_name == LayoutType.row else item_embedding_box.lry,
+                    ulx=item_embedding_box.ulx if item_name == LayoutType.ROW else tmp_item_xy,
+                    uly=tmp_item_xy if item_name == LayoutType.ROW else item_embedding_box.uly,
+                    lrx=item_embedding_box.lrx if item_name == LayoutType.ROW else table_embedding_box.lrx - 1.0,
+                    lry=table_embedding_box.lry - 1.0 if item_name == LayoutType.ROW else item_embedding_box.lry,
                     absolute_coords=True,
                 )
                 new_table_embedding_box = BoundingBox(
-                    ulx=item_table_embedding_box.ulx if item_name == LayoutType.row else tmp_item_table_xy,
-                    uly=tmp_item_table_xy if item_name == LayoutType.row else item_table_embedding_box.uly,
-                    lrx=item_table_embedding_box.lrx if item_name == LayoutType.row else table.image.width - 1.0,
-                    lry=table.image.height - 1.0 if item_name == LayoutType.row else item_table_embedding_box.lry,
+                    ulx=item_table_embedding_box.ulx if item_name == LayoutType.ROW else tmp_item_table_xy,
+                    uly=tmp_item_table_xy if item_name == LayoutType.ROW else item_table_embedding_box.uly,
+                    lrx=item_table_embedding_box.lrx if item_name == LayoutType.ROW else table.image.width - 1.0,
+                    lry=table.image.height - 1.0 if item_name == LayoutType.ROW else item_table_embedding_box.lry,
                     absolute_coords=True,
                 )
 
-            tmp_item_xy = item_embedding_box.lry if item_name == LayoutType.row else item_embedding_box.lrx
+            tmp_item_xy = item_embedding_box.lry if item_name == LayoutType.ROW else item_embedding_box.lrx
             tmp_item_table_xy = (
-                item_table_embedding_box.lry if item_name == LayoutType.row else item_table_embedding_box.lrx
+                item_table_embedding_box.lry if item_name == LayoutType.ROW else item_table_embedding_box.lrx
             )
             item.image.set_embedding(dp.image_id, new_embedding_box)
             item.image.set_embedding(table.annotation_id, new_table_embedding_box)
 
 
 def tile_tables_with_items_per_table(
-    dp: Image, table: ImageAnnotation, item_name: str, stretch_rule: Literal["left", "equal"] = "left"
+    dp: Image, table: ImageAnnotation, item_name: ObjectTypes, stretch_rule: Literal["left", "equal"] = "left"
 ) -> Image:
     """
     Tiling a table with items (i.e. rows or columns). To ensure that every position in a table can be assigned to a row
@@ -333,13 +345,13 @@ def tile_tables_with_items_per_table(
     :return: Image
     """
 
-    item_ann_ids = table.get_relationship(Relationships.child)
+    item_ann_ids = table.get_relationship(Relationships.CHILD)
     items = dp.get_annotation(category_names=item_name, annotation_ids=item_ann_ids)
 
     items.sort(
-        key=lambda x: x.get_bounding_box(dp.image_id).cx
-        if item_name == LayoutType.column
-        else x.get_bounding_box(dp.image_id).cy
+        key=lambda x: (
+            x.get_bounding_box(dp.image_id).cx if item_name == LayoutType.COLUMN else x.get_bounding_box(dp.image_id).cy
+        )
     )
 
     if stretch_rule == "left":
@@ -352,9 +364,9 @@ def tile_tables_with_items_per_table(
 
 def stretch_items(
     dp: Image,
-    table_name: str,
-    row_name: str,
-    col_name: str,
+    table_name: ObjectTypes,
+    row_name: ObjectTypes,
+    col_name: ObjectTypes,
     remove_iou_threshold_rows: float,
     remove_iou_threshold_cols: float,
 ) -> Image:
@@ -369,7 +381,7 @@ def stretch_items(
     :param remove_iou_threshold_cols: iou threshold for removing overlapping columns
     :return: An Image
     """
-    table_anns = dp.get_annotation_iter(category_names=table_name)
+    table_anns = dp.get_annotation(category_names=table_name)
 
     for table in table_anns:
         dp = stretch_item_per_table(dp, table, row_name, col_name, remove_iou_threshold_rows, remove_iou_threshold_cols)
@@ -377,7 +389,7 @@ def stretch_items(
     return dp
 
 
-def _default_segment_table(cells: List[ImageAnnotation]) -> List[SegmentationResult]:
+def _default_segment_table(cells: list[ImageAnnotation]) -> list[SegmentationResult]:
     """
     Error segmentation handling when segmentation goes wrong. It will generate a default segmentation, e.g. no real
     segmentation.
@@ -401,7 +413,7 @@ def segment_table(
     segment_rule: Literal["iou", "ioa"],
     threshold_rows: float,
     threshold_cols: float,
-) -> List[SegmentationResult]:
+) -> list[SegmentationResult]:
     """
     Segments a table,i.e. produces for each cell a SegmentationResult. It uses numbered rows and columns that have to
     be predicted by an appropriate detector. E.g. for calculating row and rwo spans it first infers the iou of a cell
@@ -421,7 +433,7 @@ def segment_table(
     :return: A list of len(number of cells) of SegmentationResult.
     """
 
-    child_ann_ids = table.get_relationship(Relationships.child)
+    child_ann_ids = table.get_relationship(Relationships.CHILD)
     cell_index_rows, row_index, _, _ = match_anns_by_intersection(
         dp,
         item_names[0],
@@ -456,7 +468,7 @@ def segment_table(
             rows_of_cell = [rows[k] for k in row_index[cell_positions_rows]]
             rs = np.count_nonzero(cell_index_rows == idx)
             if len(rows_of_cell):
-                row_number = min(int(row.get_sub_category(CellType.row_number).category_id) for row in rows_of_cell)
+                row_number = min(row.get_sub_category(CellType.ROW_NUMBER).category_id for row in rows_of_cell)
             else:
                 row_number = 0
 
@@ -464,7 +476,7 @@ def segment_table(
             cols_of_cell = [columns[k] for k in col_index[cell_positions_cols]]
             cs = np.count_nonzero(cell_index_cols == idx)
             if len(cols_of_cell):
-                col_number = min(int(col.get_sub_category(CellType.column_number).category_id) for col in cols_of_cell)
+                col_number = min(col.get_sub_category(CellType.COLUMN_NUMBER).category_id for col in cols_of_cell)
             else:
                 col_number = 0
 
@@ -484,12 +496,12 @@ def segment_table(
 
 
 def create_intersection_cells(
-    rows: List[ImageAnnotation],
-    cols: List[ImageAnnotation],
+    rows: Sequence[ImageAnnotation],
+    cols: Sequence[ImageAnnotation],
     table_annotation_id: str,
     cell_class_id: int,
-    sub_item_names: List[CellType],
-) -> Tuple[List[DetectionResult], List[SegmentationResult]]:
+    sub_item_names: Sequence[ObjectTypes],
+) -> tuple[Sequence[DetectionResult], Sequence[SegmentationResult]]:
     """
     Given rows and columns with row- and column number sub categories, create a list of `DetectionResult` and
     `SegmentationResult` as intersection of all their intersection rectangles.
@@ -508,6 +520,7 @@ def create_intersection_cells(
     detect_result_cells = []
     segment_result_cells = []
     idx = 0
+    break_outer_loop = False
     for row in rows:
         for col in cols:
             detect_result_cells.append(
@@ -515,31 +528,76 @@ def create_intersection_cells(
                     box=boxes_cells[idx].to_list(mode="xyxy"),
                     class_id=cell_class_id,
                     absolute_coords=boxes_cells[idx].absolute_coords,
-                    class_name=LayoutType.cell,
+                    class_name=LayoutType.CELL,
                 )
             )
             segment_result_cells.append(
                 SegmentationResult(
                     annotation_id="",
-                    row_num=int(row.get_sub_category(sub_item_names[0]).category_id),
-                    col_num=int(col.get_sub_category(sub_item_names[1]).category_id),
+                    row_num=row.get_sub_category(sub_item_names[0]).category_id,
+                    col_num=col.get_sub_category(sub_item_names[1]).category_id,
                     rs=1,
                     cs=1,
                 )
             )
             idx += 1
+            # it is possible to have less intersection boxes, e.g. if one cell has height/width 0. We need to break both
+            # loops.
+            if idx >= len(boxes_cells):
+                break_outer_loop = True
+                break
+        if break_outer_loop:
+            break
     return detect_result_cells, segment_result_cells
+
+
+def header_cell_to_item_detect_result(
+    dp: Image,
+    table: ImageAnnotation,
+    item_name: ObjectTypes,
+    item_header_name: ObjectTypes,
+    segment_rule: Literal["iou", "ioa"],
+    threshold: float,
+) -> list[ItemHeaderResult]:
+    """
+    Match header cells to items (rows or columns) based on intersection-over-union (iou) or intersection-over-area (ioa)
+    and return a list of ItemHeaderResult.
+
+    :param dp: The image containing the table and items.
+    :param table: The table image annotation.
+    :param item_name: The type of items (e.g., rows or columns) to match with header cells.
+    :param item_header_name: The type of header cells to match with items.
+    :param segment_rule: The rule to use for matching, either 'iou' or 'ioa'.
+    :param threshold: The iou/ioa threshold for matching header cells with items.
+    :return: A list of ItemHeaderResult containing the matched header cells.
+    """
+    child_ann_ids = table.get_relationship(Relationships.CHILD)
+    item_index, _, items, _ = match_anns_by_intersection(
+        dp,
+        item_header_name,
+        item_name,
+        segment_rule,
+        threshold,
+        True,
+        child_ann_ids,
+        child_ann_ids,
+    )
+    item_headers = []
+    for idx, item in enumerate(items):
+        if idx in item_index:
+            item_headers.append(ItemHeaderResult(annotation_id=item.annotation_id))
+    return item_headers
 
 
 def segment_pubtables(
     dp: Image,
     table: ImageAnnotation,
-    item_names: List[LayoutType],
-    spanning_cell_names: List[CellType],
+    item_names: Sequence[ObjectTypes],
+    spanning_cell_names: Sequence[ObjectTypes],
     segment_rule: Literal["iou", "ioa"],
     threshold_rows: float,
     threshold_cols: float,
-) -> List[SegmentationResult]:
+) -> list[SegmentationResult]:
     """
     Segment a table based on the results of `table-transformer-structure-recognition`. The processing assumes that cells
     have already been generated from the intersection of columns and rows and that column and row numbers have been
@@ -547,7 +605,7 @@ def segment_pubtables(
 
     Row and column positions as well as row and column lengths are determined for all types of spanning cells.
     All simple cells that are covered by a spanning cell as well in the table position (double allocation) are then
-    removed.
+    replaced by the spanning cell and deactivated.
 
     :param dp: Image
     :param table: table ImageAnnotation
@@ -560,7 +618,8 @@ def segment_pubtables(
                                to the column.
     :return: A list of len(number of cells) of SegmentationResult for spanning cells
     """
-    child_ann_ids = table.get_relationship(Relationships.child)
+
+    child_ann_ids = table.get_relationship(Relationships.CHILD)
     cell_index_rows, row_index, _, _ = match_anns_by_intersection(
         dp,
         item_names[0],
@@ -594,28 +653,76 @@ def segment_pubtables(
         for idx, cell in enumerate(spanning_cells):
             cell_positions_rows = cell_index_rows == idx
             rows_of_cell = [rows[k] for k in row_index[cell_positions_rows]]
-            rs = (
-                max(int(row.get_sub_category(CellType.row_number).category_id) for row in rows_of_cell)
-                - min(int(row.get_sub_category(CellType.row_number).category_id) for row in rows_of_cell)
-                + 1
-            )
-            if len(rows_of_cell):
-                row_number = min(int(row.get_sub_category(CellType.row_number).category_id) for row in rows_of_cell)
+            if rows_of_cell:
+                min_row_cell = min(rows_of_cell, key=lambda row: row.get_sub_category(CellType.ROW_NUMBER).category_id)
+                max_row_cell = max(rows_of_cell, key=lambda row: row.get_sub_category(CellType.ROW_NUMBER).category_id)
+                max_row = max_row_cell.get_sub_category(CellType.ROW_NUMBER).category_id
+                min_row = min_row_cell.get_sub_category(CellType.ROW_NUMBER).category_id
+                rs = max_row - min_row + 1
+                row_number = min_row
             else:
+                rs = 0
                 row_number = 0
 
             cell_positions_cols = cell_index_cols == idx
             cols_of_cell = [columns[k] for k in col_index[cell_positions_cols]]
-            cs = (
-                max(int(col.get_sub_category(CellType.column_number).category_id) for col in cols_of_cell)
-                - min(int(col.get_sub_category(CellType.column_number).category_id) for col in cols_of_cell)
-                + 1
-            )
 
-            if len(cols_of_cell):
-                col_number = min(int(col.get_sub_category(CellType.column_number).category_id) for col in cols_of_cell)
+            if cols_of_cell:
+                min_col_cell = min(
+                    cols_of_cell, key=lambda col: col.get_sub_category(CellType.COLUMN_NUMBER).category_id
+                )
+                max_col_cell = max(
+                    cols_of_cell, key=lambda col: col.get_sub_category(CellType.COLUMN_NUMBER).category_id
+                )
+                max_col = max_col_cell.get_sub_category(CellType.COLUMN_NUMBER).category_id
+                min_col = min_col_cell.get_sub_category(CellType.COLUMN_NUMBER).category_id
+                cs = max_col - min_col + 1
+                col_number = min_col
             else:
+                cs = 0
                 col_number = 0
+
+            if rows_of_cell and cols_of_cell:
+                # We resize all bounding boxes of spanning cells so that they match with the grid structure, determined
+                # by the rows ans columns.
+                merge_box_image_row = merge_boxes(
+                    *[min_row_cell.get_bounding_box(dp.image_id), max_row_cell.get_bounding_box(dp.image_id)]
+                )
+                merge_box_image_column = merge_boxes(
+                    *[min_col_cell.get_bounding_box(dp.image_id), max_col_cell.get_bounding_box(dp.image_id)]
+                )
+                merge_box_image = intersection_box(merge_box_image_row, merge_box_image_column)
+                merge_box_table_row = merge_boxes(
+                    *[
+                        min_row_cell.get_bounding_box(table.annotation_id),
+                        max_row_cell.get_bounding_box(table.annotation_id),
+                    ]
+                )
+                merge_box_table_column = merge_boxes(
+                    *[
+                        min_col_cell.get_bounding_box(table.annotation_id),
+                        max_col_cell.get_bounding_box(table.annotation_id),
+                    ]
+                )
+                merge_box_table = intersection_box(merge_box_table_row, merge_box_table_column)
+                merge_box_spanning_cell_row = merge_boxes(
+                    *[
+                        min_row_cell.get_bounding_box(min_row_cell.annotation_id),
+                        max_row_cell.get_bounding_box(max_row_cell.annotation_id),
+                    ]
+                )
+                merge_box_spanning_cell_column = merge_boxes(
+                    *[
+                        min_col_cell.get_bounding_box(min_col_cell.annotation_id),
+                        max_col_cell.get_bounding_box(max_col_cell.annotation_id),
+                    ]
+                )
+                merge_box_spanning_cell = intersection_box(merge_box_spanning_cell_row, merge_box_spanning_cell_column)
+                if cell.image is None:
+                    raise ImageError("cell.image cannot be None")
+                cell.image.set_embedding(dp.image_id, merge_box_image)
+                cell.image.set_embedding(table.annotation_id, merge_box_table)
+                cell.image.set_embedding(cell.annotation_id, merge_box_spanning_cell)
 
             raw_table_segments.append(
                 SegmentationResult(
@@ -668,6 +775,10 @@ class TableSegmentationService(PipelineComponent):
         tile_table_with_items: bool,
         remove_iou_threshold_rows: float,
         remove_iou_threshold_cols: float,
+        table_name: TypeOrStr,
+        cell_names: Sequence[TypeOrStr],
+        item_names: Sequence[TypeOrStr],
+        sub_item_names: Sequence[TypeOrStr],
         stretch_rule: Literal["left", "equal"] = "left",
     ):
         """
@@ -678,10 +789,16 @@ class TableSegmentationService(PipelineComponent):
                                       the adjacent row. Will do a similar shifting with columns.
         :param remove_iou_threshold_rows: iou threshold for removing overlapping rows
         :param remove_iou_threshold_cols: iou threshold for removing overlapping columns
+        :param table_name: layout type table
+        :param cell_names: layout type of cells
+        :param item_names: layout type of items (e.g. row and column)
+        :param sub_item_names: cell types of sub items (e.g. row number and column number)
         :param stretch_rule: Check the description in `tile_tables_with_items_per_table`
         """
-        assert segment_rule in ("iou", "ioa"), "segment_rule must be either iou or ioa"
-        assert stretch_rule in ("left", "equal"), "stretch rule must be either 'left' or 'equal'"
+        if segment_rule not in ("iou", "ioa"):
+            raise ValueError("segment_rule must be either iou or ioa")
+        if stretch_rule not in ("left", "equal"):
+            raise ValueError("stretch rule must be either 'left' or 'equal'")
 
         self.segment_rule = segment_rule
         self.threshold_rows = threshold_rows
@@ -689,43 +806,46 @@ class TableSegmentationService(PipelineComponent):
         self.tile_table = tile_table_with_items
         self.remove_iou_threshold_rows = remove_iou_threshold_rows
         self.remove_iou_threshold_cols = remove_iou_threshold_cols
+        self.table_name = get_type(table_name)
+        self.cell_names = [get_type(cell_name) for cell_name in cell_names]
+        self.item_names = [get_type(item_name) for item_name in item_names]  # row names must be before column name
+        self.sub_item_names = [get_type(sub_item_name) for sub_item_name in sub_item_names]
         self.stretch_rule = stretch_rule
-        self._table_name = LayoutType.table
-        self._cell_names = [CellType.header, CellType.body, LayoutType.cell]
-        self._item_names = [LayoutType.row, LayoutType.column]  # row names must be before column name
-        self._sub_item_names = [CellType.row_number, CellType.column_number]
+        self.item_iou_threshold = 0.0001
         super().__init__("table_segment")
 
     def serve(self, dp: Image) -> None:
         dp = stretch_items(
             dp,
-            self._table_name,
-            self._item_names[0],
-            self._item_names[1],
+            self.table_name,
+            self.item_names[0],
+            self.item_names[1],
             self.remove_iou_threshold_rows,
             self.remove_iou_threshold_cols,
         )
-        table_anns = dp.get_annotation(category_names=self._table_name)
+        table_anns = dp.get_annotation(category_names=self.table_name)
         for table in table_anns:
-            item_ann_ids = table.get_relationship(Relationships.child)
-            for item_sub_item_name in zip(self._item_names, self._sub_item_names):  # one pass for rows and one for cols
+            item_ann_ids = table.get_relationship(Relationships.CHILD)
+            for item_sub_item_name in zip(self.item_names, self.sub_item_names):  # one pass for rows and one for cols
                 item_name, sub_item_name = item_sub_item_name[0], item_sub_item_name[1]
                 if self.tile_table:
                     dp = tile_tables_with_items_per_table(dp, table, item_name, self.stretch_rule)
                 items_proposals = dp.get_annotation(category_names=item_name, annotation_ids=item_ann_ids)
                 reference_items_proposals = dp.get_annotation(
-                    category_names=self._cell_names, annotation_ids=item_ann_ids
+                    category_names=self.cell_names, annotation_ids=item_ann_ids
                 )
-                dp = choose_items_by_iou(dp, items_proposals, 0.0001, False, reference_items_proposals)
+                dp = choose_items_by_iou(dp, items_proposals, self.item_iou_threshold, False, reference_items_proposals)
 
                 # new query of items so that we only get active annotations
                 items = dp.get_annotation(category_names=item_name, annotation_ids=item_ann_ids)
 
                 # we will assume that either all or no image attribute has been generated
                 items.sort(
-                    key=lambda x: x.get_bounding_box(dp.image_id).cx # pylint: disable=W0640
-                    if item_name == LayoutType.column  # pylint: disable=W0640
-                    else x.get_bounding_box(dp.image_id).cy # pylint: disable=W0640
+                    key=lambda x: (
+                        x.get_bounding_box(dp.image_id).cx  # pylint: disable=W0640
+                        if item_name == LayoutType.COLUMN  # pylint: disable=W0640
+                        else x.get_bounding_box(dp.image_id).cy  # pylint: disable=W0640
+                    )
                 )
 
                 for item_number, item in enumerate(items, 1):
@@ -735,53 +855,53 @@ class TableSegmentationService(PipelineComponent):
             raw_table_segments = segment_table(
                 dp,
                 table,
-                self._item_names,
-                self._cell_names,
+                self.item_names,
+                self.cell_names,
                 self.segment_rule,
                 self.threshold_rows,
                 self.threshold_cols,
             )
             for segment_result in raw_table_segments:
                 self.dp_manager.set_category_annotation(
-                    CellType.row_number, segment_result.row_num, CellType.row_number, segment_result.annotation_id
+                    CellType.ROW_NUMBER, segment_result.row_num, CellType.ROW_NUMBER, segment_result.annotation_id
                 )
                 self.dp_manager.set_category_annotation(
-                    CellType.column_number, segment_result.col_num, CellType.column_number, segment_result.annotation_id
+                    CellType.COLUMN_NUMBER, segment_result.col_num, CellType.COLUMN_NUMBER, segment_result.annotation_id
                 )
                 self.dp_manager.set_category_annotation(
-                    CellType.row_span, segment_result.rs, CellType.row_span, segment_result.annotation_id
+                    CellType.ROW_SPAN, segment_result.rs, CellType.ROW_SPAN, segment_result.annotation_id
                 )
                 self.dp_manager.set_category_annotation(
-                    CellType.column_span, segment_result.cs, CellType.column_span, segment_result.annotation_id
+                    CellType.COLUMN_SPAN, segment_result.cs, CellType.COLUMN_SPAN, segment_result.annotation_id
                 )
 
             if table.image:
-                cells = table.image.get_annotation(category_names=self._cell_names)
-                number_of_rows = max(int(cell.get_sub_category(CellType.row_number).category_id) for cell in cells)
-                number_of_cols = max(int(cell.get_sub_category(CellType.column_number).category_id) for cell in cells)
-                max_row_span = max(int(cell.get_sub_category(CellType.row_span).category_id) for cell in cells)
-                max_col_span = max(int(cell.get_sub_category(CellType.column_span).category_id) for cell in cells)
+                cells = table.image.get_annotation(category_names=self.cell_names)
+                number_of_rows = max(cell.get_sub_category(CellType.ROW_NUMBER).category_id for cell in cells)
+                number_of_cols = max(cell.get_sub_category(CellType.COLUMN_NUMBER).category_id for cell in cells)
+                max_row_span = max(cell.get_sub_category(CellType.ROW_SPAN).category_id for cell in cells)
+                max_col_span = max(cell.get_sub_category(CellType.COLUMN_SPAN).category_id for cell in cells)
                 # TODO: the summaries should be sub categories of the underlying ann
                 self.dp_manager.set_summary_annotation(
-                    TableType.number_of_rows,
-                    TableType.number_of_rows,
+                    TableType.NUMBER_OF_ROWS,
+                    TableType.NUMBER_OF_ROWS,
                     number_of_rows,
                     annotation_id=table.annotation_id,
                 )
                 self.dp_manager.set_summary_annotation(
-                    TableType.number_of_columns,
-                    TableType.number_of_columns,
+                    TableType.NUMBER_OF_COLUMNS,
+                    TableType.NUMBER_OF_COLUMNS,
                     number_of_cols,
                     annotation_id=table.annotation_id,
                 )
                 self.dp_manager.set_summary_annotation(
-                    TableType.max_row_span, TableType.max_row_span, max_row_span, annotation_id=table.annotation_id
+                    TableType.MAX_ROW_SPAN, TableType.MAX_ROW_SPAN, max_row_span, annotation_id=table.annotation_id
                 )
                 self.dp_manager.set_summary_annotation(
-                    TableType.max_col_span, TableType.max_col_span, max_col_span, annotation_id=table.annotation_id
+                    TableType.MAX_COL_SPAN, TableType.MAX_COL_SPAN, max_col_span, annotation_id=table.annotation_id
                 )
 
-    def clone(self) -> PipelineComponent:
+    def clone(self) -> TableSegmentationService:
         return self.__class__(
             self.segment_rule,
             self.threshold_rows,
@@ -789,42 +909,45 @@ class TableSegmentationService(PipelineComponent):
             self.tile_table,
             self.remove_iou_threshold_rows,
             self.remove_iou_threshold_cols,
+            self.table_name,
+            self.cell_names,
+            self.item_names,
+            self.sub_item_names,
+            self.stretch_rule,
         )
 
-    def get_meta_annotation(self) -> JsonDict:
-        return dict(
-            [
-                ("image_annotations", []),
-                (
-                    "sub_categories",
-                    {
-                        LayoutType.cell: {
-                            CellType.row_number,
-                            CellType.column_number,
-                            CellType.row_span,
-                            CellType.column_span,
-                        },
-                        LayoutType.row: {CellType.row_number},
-                        LayoutType.column: {CellType.column_number},
-                    },
-                ),
-                ("relationships", {}),
-                ("summaries", []),
-            ]
+    def get_meta_annotation(self) -> MetaAnnotation:
+        return MetaAnnotation(
+            image_annotations=(),
+            sub_categories={
+                LayoutType.CELL: {
+                    CellType.ROW_NUMBER,
+                    CellType.COLUMN_NUMBER,
+                    CellType.ROW_SPAN,
+                    CellType.COLUMN_SPAN,
+                },
+                LayoutType.ROW: {CellType.ROW_NUMBER},
+                LayoutType.COLUMN: {CellType.COLUMN_NUMBER},
+            },
+            relationships={},
+            summaries=(),
         )
+
+    def clear_predictor(self) -> None:
+        """clear predictor. Will do nothing"""
 
 
 class PubtablesSegmentationService(PipelineComponent):
     """
     Table segmentation for table recognition detectors trained on Pubtables1M dataset. It will require `ImageAnnotation`
     of type `LayoutType.row`, `LayoutType.column` and cells of at least one type `CellType.spanning`,
-    `CellType.row_header`, `CellType.column_header`, `CellType.projected_row_header`. For table recognition using
+    `CellType.ROW_HEADER`, `CellType.COLUMN_HEADER`, `CellType.PROJECTED_ROW_HEADER`. For table recognition using
     this service build a pipeline as follows:
 
     **Example:**
 
         layout = ImageLayoutService(layout_detector, to_image=True, crop_image=True)
-        recognition = SubImageLayoutService(table_recognition_detector, LayoutType.table, {1: 6, 2:7, 3:8, 4:9}, True)
+        recognition = SubImageLayoutService(table_recognition_detector, LayoutType.TABLE, {1: 6, 2:7, 3:8, 4:9}, True)
         segment = PubtablesSegmentationService('ioa', 0.4, 0.4, True, 0.8, 0.8, 7)
         ...
 
@@ -854,6 +977,13 @@ class PubtablesSegmentationService(PipelineComponent):
         remove_iou_threshold_rows: float,
         remove_iou_threshold_cols: float,
         cell_class_id: int,
+        table_name: TypeOrStr,
+        cell_names: Sequence[TypeOrStr],
+        spanning_cell_names: Sequence[TypeOrStr],
+        item_names: Sequence[TypeOrStr],
+        sub_item_names: Sequence[TypeOrStr],
+        item_header_cell_names: Sequence[TypeOrStr],
+        item_header_thresholds: Sequence[float],
         cell_to_image: bool = True,
         crop_cell_image: bool = False,
         stretch_rule: Literal["left", "equal"] = "left",
@@ -868,6 +998,16 @@ class PubtablesSegmentationService(PipelineComponent):
         :param remove_iou_threshold_rows: iou threshold for removing overlapping rows
         :param remove_iou_threshold_cols: iou threshold for removing overlapping columns
         :param cell_class_id: 'category_id' for cells to be generated from intersected rows and columns
+        :param table_name: layout type table
+        :param cell_names: layout type of cells
+        :param spanning_cell_names: layout type of spanning cells
+        :param item_names: layout type of items (e.g. row and column)
+        :param sub_item_names: layout type of sub items (e.g. row number and column number)
+        :param item_header_cell_names: layout type of item header cells (e.g. CellType.COLUMN_HEADER,
+        CellType.ROW_HEADER). Note that column header, resp. row header will be first assigned to rows, resp. columns
+        and then transferred to cells.
+        :param item_header_thresholds: iou/ioa threshold for matching header cells with items. The first threshold
+        corresponds to matching the first entry of item_names.
         :param cell_to_image: If set to 'True' it will create an 'Image' for LayoutType.cell
         :param crop_cell_image: If set to 'True' it will crop a numpy array image for LayoutType.cell.
                                 Requires 'cell_to_image=True'
@@ -877,64 +1017,79 @@ class PubtablesSegmentationService(PipelineComponent):
         self.threshold_rows = threshold_rows
         self.threshold_cols = threshold_cols
         self.tile_table = tile_table_with_items
-        self._table_name = LayoutType.table
-        self._cell_names = [
-            CellType.spanning,
-            CellType.row_header,
-            CellType.column_header,
-            CellType.projected_row_header,
-            LayoutType.cell,
-        ]
-        self._spanning_cell_names = [
-            CellType.spanning,
-            CellType.row_header,
-            CellType.column_header,
-            CellType.projected_row_header,
-        ]
+        self.table_name = get_type(table_name)
+        self.cell_names = [get_type(cell_name) for cell_name in cell_names]
+        self.spanning_cell_names = [get_type(cell_name) for cell_name in spanning_cell_names]
         self.remove_iou_threshold_rows = remove_iou_threshold_rows
         self.remove_iou_threshold_cols = remove_iou_threshold_cols
         self.cell_class_id = cell_class_id
         self.cell_to_image = cell_to_image
         self.crop_cell_image = crop_cell_image
+        self.item_names = [get_type(item_name) for item_name in item_names]  # row names must be before column name
+        self.sub_item_names = [get_type(item_name) for item_name in sub_item_names]
         self.stretch_rule = stretch_rule
+        self.item_header_cell_names = [get_type(item_name) for item_name in item_header_cell_names]
+        self.item_header_thresholds = item_header_thresholds
 
-        self._item_names = [LayoutType.row, LayoutType.column]  # row names must be before column name
-        self._sub_item_names = [CellType.row_number, CellType.column_number]
         super().__init__("table_transformer_segment")
 
     def serve(self, dp: Image) -> None:
         dp = stretch_items(
             dp,
-            self._table_name,
-            self._item_names[0],
-            self._item_names[1],
+            self.table_name,
+            self.item_names[0],
+            self.item_names[1],
             self.remove_iou_threshold_rows,
             self.remove_iou_threshold_cols,
         )
-        table_anns = dp.get_annotation(category_names=self._table_name)
+        table_anns = dp.get_annotation(category_names=self.table_name)
+        has_item_headers = {item: False for item in self.item_names}
         for table in table_anns:
-            item_ann_ids = table.get_relationship(Relationships.child)
-            for item_sub_item_name in zip(self._item_names, self._sub_item_names):  # one pass for rows and one for cols
-                item_name, sub_item_name = item_sub_item_name[0], item_sub_item_name[1]
+            item_ann_ids = table.get_relationship(Relationships.CHILD)
+            for item_sub_item_name in zip(
+                self.item_names, self.sub_item_names, self.item_header_cell_names, self.item_header_thresholds
+            ):  # one pass for rows and one for cols
+                item_name, sub_item_name, item_header_cell_name, item_header_threshold = (
+                    item_sub_item_name[0],
+                    item_sub_item_name[1],
+                    item_sub_item_name[2],
+                    item_sub_item_name[3],
+                )
                 if self.tile_table:
                     dp = tile_tables_with_items_per_table(dp, table, item_name, self.stretch_rule)
                 items = dp.get_annotation(category_names=item_name, annotation_ids=item_ann_ids)
 
                 # we will assume that either all or no image attribute has been generated
                 items.sort(
-                    key=lambda x: x.get_bounding_box(dp.image_id).cx
-                    if item_name == LayoutType.column  # pylint: disable=W0640
-                    else x.get_bounding_box(dp.image_id).cy
+                    key=lambda x: (
+                        x.get_bounding_box(dp.image_id).cx
+                        if item_name == LayoutType.COLUMN  # pylint: disable=W0640
+                        else x.get_bounding_box(dp.image_id).cy
+                    )
                 )
+
+                item_headers_detect_results = header_cell_to_item_detect_result(
+                    dp, table, item_name, item_header_cell_name, self.segment_rule, item_header_threshold
+                )
+                if item_headers_detect_results:
+                    has_item_headers[item_name] = True
 
                 for item_number, item in enumerate(items, 1):
                     self.dp_manager.set_category_annotation(
                         sub_item_name, item_number, sub_item_name, item.annotation_id
                     )
-            rows = dp.get_annotation(category_names=self._item_names[0], annotation_ids=item_ann_ids)
-            columns = dp.get_annotation(category_names=self._item_names[1], annotation_ids=item_ann_ids)
+                for item_header_detect_result in item_headers_detect_results:
+                    self.dp_manager.set_category_annotation(
+                        category_name=item_header_cell_name,
+                        category_id=None,
+                        sub_cat_key=item_header_cell_name,
+                        annotation_id=item_header_detect_result.annotation_id,
+                    )
+
+            rows = dp.get_annotation(category_names=self.item_names[0], annotation_ids=item_ann_ids)
+            columns = dp.get_annotation(category_names=self.item_names[1], annotation_ids=item_ann_ids)
             detect_result_cells, segment_result_cells = create_intersection_cells(
-                rows, columns, table.annotation_id, self.cell_class_id, self._sub_item_names
+                rows, columns, table.annotation_id, self.cell_class_id, self.sub_item_names
             )
             cell_rn_cn_to_ann_id = {}
             for detect_result, segment_result in zip(detect_result_cells, segment_result_cells):
@@ -945,39 +1100,48 @@ class PubtablesSegmentationService(PipelineComponent):
                     crop_image=self.crop_cell_image,
                 )
                 self.dp_manager.set_category_annotation(
-                    CellType.row_number, segment_result.row_num, CellType.row_number, segment_result.annotation_id
+                    CellType.ROW_NUMBER, segment_result.row_num, CellType.ROW_NUMBER, segment_result.annotation_id
                 )
                 self.dp_manager.set_category_annotation(
-                    CellType.column_number, segment_result.col_num, CellType.column_number, segment_result.annotation_id
+                    CellType.COLUMN_NUMBER, segment_result.col_num, CellType.COLUMN_NUMBER, segment_result.annotation_id
                 )
                 self.dp_manager.set_category_annotation(
-                    CellType.row_span, segment_result.rs, CellType.row_span, segment_result.annotation_id
+                    CellType.ROW_SPAN, segment_result.rs, CellType.ROW_SPAN, segment_result.annotation_id
                 )
                 self.dp_manager.set_category_annotation(
-                    CellType.column_span, segment_result.cs, CellType.column_span, segment_result.annotation_id
+                    CellType.COLUMN_SPAN, segment_result.cs, CellType.COLUMN_SPAN, segment_result.annotation_id
                 )
                 cell_rn_cn_to_ann_id[(segment_result.row_num, segment_result.col_num)] = segment_result.annotation_id
+
             spanning_cell_raw_segments = segment_pubtables(
                 dp,
                 table,
-                self._item_names,
-                self._spanning_cell_names,
+                self.item_names,
+                self.spanning_cell_names,
                 self.segment_rule,
                 self.threshold_rows,
                 self.threshold_cols,
             )
+
             for segment_result in spanning_cell_raw_segments:
+                if (
+                    (segment_result.rs == 1 and segment_result.cs == 1)
+                    or segment_result.rs == 0
+                    or segment_result.cs == 0
+                ):
+                    self.dp_manager.deactivate_annotation(segment_result.annotation_id)
+                    continue
                 self.dp_manager.set_category_annotation(
-                    CellType.row_number, segment_result.row_num, CellType.row_number, segment_result.annotation_id
+                    CellType.ROW_NUMBER, segment_result.row_num, CellType.ROW_NUMBER, segment_result.annotation_id
                 )
                 self.dp_manager.set_category_annotation(
-                    CellType.column_number, segment_result.col_num, CellType.column_number, segment_result.annotation_id
+                    CellType.COLUMN_NUMBER, segment_result.col_num, CellType.COLUMN_NUMBER, segment_result.annotation_id
                 )
                 self.dp_manager.set_category_annotation(
-                    CellType.row_span, segment_result.rs, CellType.row_span, segment_result.annotation_id
+                    CellType.ROW_SPAN, segment_result.rs, CellType.ROW_SPAN, segment_result.annotation_id
                 )
                 self.dp_manager.set_category_annotation(
-                    CellType.column_span, segment_result.cs, CellType.column_span, segment_result.annotation_id
+                    CellType.COLUMN_SPAN, segment_result.cs, CellType.COLUMN_SPAN, segment_result.annotation_id
                 )
                 cells_to_deactivate = []
                 for rs in range(segment_result.rs):
@@ -987,33 +1151,74 @@ class PubtablesSegmentationService(PipelineComponent):
                     cell_ann_id = cell_rn_cn_to_ann_id[cell_position]
                     self.dp_manager.deactivate_annotation(cell_ann_id)
 
+            for segment_result in spanning_cell_raw_segments:
+                if (
+                    (segment_result.rs == 1 and segment_result.cs == 1)
+                    or segment_result.rs == 0
+                    or segment_result.cs == 0
+                ):
+                    continue
+                for rs in range(segment_result.rs):
+                    for cs in range(segment_result.cs):
+                        cell_rn_cn_to_ann_id[
+                            (segment_result.row_num + rs, segment_result.col_num + cs)
+                        ] = segment_result.annotation_id
+
             cells = []
             if table.image:
-                cells = table.image.get_annotation(category_names=self._cell_names)
-            number_of_rows = max(int(cell.get_sub_category(CellType.row_number).category_id) for cell in cells)
-            number_of_cols = max(int(cell.get_sub_category(CellType.column_number).category_id) for cell in cells)
-            max_row_span = max(int(cell.get_sub_category(CellType.row_span).category_id) for cell in cells)
-            max_col_span = max(int(cell.get_sub_category(CellType.column_span).category_id) for cell in cells)
+                cells = table.image.get_annotation(category_names=self.cell_names)
+            if cells:
+                number_of_rows = max(cell.get_sub_category(CellType.ROW_NUMBER).category_id for cell in cells)
+                number_of_cols = max(cell.get_sub_category(CellType.COLUMN_NUMBER).category_id for cell in cells)
+                max_row_span = max(cell.get_sub_category(CellType.ROW_SPAN).category_id for cell in cells)
+                max_col_span = max(cell.get_sub_category(CellType.COLUMN_SPAN).category_id for cell in cells)
+            else:
+                number_of_rows = 0
+                number_of_cols = 0
+                max_row_span = 0
+                max_col_span = 0
+
+            for idx, item_vals in enumerate(zip(self.item_names, self.item_header_cell_names, self.sub_item_names)):
+                item_obj_type, item_header_cell_name, sub_item_name = item_vals[0], item_vals[1], item_vals[2]
+
+                if has_item_headers[item_obj_type]:
+                    items = dp.get_annotation(category_names=item_obj_type)
+
+                    for item_ann in items:
+                        if item_header_cell_name in item_ann.sub_categories:
+                            item_number = item_ann.get_sub_category(sub_item_name).category_id
+                            for key, value in cell_rn_cn_to_ann_id.items():
+                                if key[idx] == item_number:
+                                    cell_ann = dp.get_annotation(annotation_ids=value)[0]
+                                    self.dp_manager.set_category_annotation(
+                                        item_header_cell_name, None, item_header_cell_name, cell_ann.annotation_id
+                                    )
+                                else:
+                                    cell_ann = dp.get_annotation(annotation_ids=value)[0]
+                                    self.dp_manager.set_category_annotation(
+                                        item_header_cell_name, None, CellType.BODY, cell_ann.annotation_id
+                                    )
+
             # TODO: the summaries should be sub categories of the underlying ann
             self.dp_manager.set_summary_annotation(
-                TableType.number_of_rows, TableType.number_of_rows, number_of_rows, annotation_id=table.annotation_id
+                TableType.NUMBER_OF_ROWS, TableType.NUMBER_OF_ROWS, number_of_rows, annotation_id=table.annotation_id
             )
             self.dp_manager.set_summary_annotation(
-                TableType.number_of_columns,
-                TableType.number_of_columns,
+                TableType.NUMBER_OF_COLUMNS,
+                TableType.NUMBER_OF_COLUMNS,
                 number_of_cols,
                 annotation_id=table.annotation_id,
             )
             self.dp_manager.set_summary_annotation(
-                TableType.max_row_span, TableType.max_row_span, max_row_span, annotation_id=table.annotation_id
+                TableType.MAX_ROW_SPAN, TableType.MAX_ROW_SPAN, max_row_span, annotation_id=table.annotation_id
             )
             self.dp_manager.set_summary_annotation(
-                TableType.max_col_span, TableType.max_col_span, max_col_span, annotation_id=table.annotation_id
+                TableType.MAX_COL_SPAN, TableType.MAX_COL_SPAN, max_col_span, annotation_id=table.annotation_id
             )
-            html = generate_html_string(table)
-            self.dp_manager.set_container_annotation(TableType.html, -1, TableType.html, table.annotation_id, html)
+            html = generate_html_string(table, self.cell_names + self.spanning_cell_names)
+            self.dp_manager.set_container_annotation(TableType.HTML, -1, TableType.HTML, table.annotation_id, html)
 
-    def clone(self) -> PipelineComponent:
+    def clone(self) -> PubtablesSegmentationService:
         return self.__class__(
             self.segment_rule,
             self.threshold_rows,
@@ -1022,53 +1227,55 @@ class PubtablesSegmentationService(PipelineComponent):
             self.remove_iou_threshold_rows,
             self.remove_iou_threshold_cols,
             self.cell_class_id,
+            self.table_name,
+            self.cell_names,
+            self.spanning_cell_names,
+            self.item_names,
+            self.sub_item_names,
+            self.item_header_cell_names,
+            self.item_header_thresholds,
             self.cell_to_image,
             self.crop_cell_image,
             self.stretch_rule,
         )
 
-    def get_meta_annotation(self) -> JsonDict:
-        return dict(
-            [
-                ("image_annotations", []),
-                (
-                    "sub_categories",
-                    {
-                        LayoutType.cell: {
-                            CellType.row_number,
-                            CellType.column_number,
-                            CellType.row_span,
-                            CellType.column_span,
-                        },
-                        CellType.spanning: {
-                            CellType.row_number,
-                            CellType.column_number,
-                            CellType.row_span,
-                            CellType.column_span,
-                        },
-                        CellType.row_header: {
-                            CellType.row_number,
-                            CellType.column_number,
-                            CellType.row_span,
-                            CellType.column_span,
-                        },
-                        CellType.column_header: {
-                            CellType.row_number,
-                            CellType.column_number,
-                            CellType.row_span,
-                            CellType.column_span,
-                        },
-                        CellType.projected_row_header: {
-                            CellType.row_number,
-                            CellType.column_number,
-                            CellType.row_span,
-                            CellType.column_span,
-                        },
-                        LayoutType.row: {CellType.row_number},
-                        LayoutType.column: {CellType.column_number},
-                    },
-                ),
-                ("relationships", {}),
-                ("summaries", []),
-            ]
+    def get_meta_annotation(self) -> MetaAnnotation:
+        return MetaAnnotation(
+            image_annotations=(),
+            sub_categories={
+                LayoutType.CELL: {
+                    CellType.ROW_NUMBER,
+                    CellType.COLUMN_NUMBER,
+                    CellType.ROW_SPAN,
+                    CellType.COLUMN_SPAN,
+                },
+                CellType.SPANNING: {
+                    CellType.ROW_NUMBER,
+                    CellType.COLUMN_NUMBER,
+                    CellType.ROW_SPAN,
+                    CellType.COLUMN_SPAN,
+                },
+                CellType.ROW_HEADER: {
+                    CellType.ROW_NUMBER,
+                    CellType.COLUMN_NUMBER,
+                    CellType.ROW_SPAN,
+                    CellType.COLUMN_SPAN,
+                },
+                CellType.COLUMN_HEADER: {
+                    CellType.ROW_NUMBER,
+                    CellType.COLUMN_NUMBER,
+                    CellType.ROW_SPAN,
+                    CellType.COLUMN_SPAN,
+                },
+                CellType.PROJECTED_ROW_HEADER: {
+                    CellType.ROW_NUMBER,
+                    CellType.COLUMN_NUMBER,
+                    CellType.ROW_SPAN,
+                    CellType.COLUMN_SPAN,
+                },
+                LayoutType.ROW: {CellType.ROW_NUMBER},
+                LayoutType.COLUMN: {CellType.COLUMN_NUMBER},
+            },
+            relationships={},
+            summaries=(),
         )

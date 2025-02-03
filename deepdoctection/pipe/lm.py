@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# File: tokenclass.py
+# File: lm.py
 
 # Copyright 2021 Dr. Janis Meyer. All rights reserved.
 #
@@ -18,60 +18,24 @@
 """
 Module for token classification pipeline
 """
+from __future__ import annotations
 
 from copy import copy
-from typing import Any, List, Literal, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Sequence, Union
 
 from ..datapoint.image import Image
-from ..extern.hflayoutlm import HFLayoutLmSequenceClassifierBase, HFLayoutLmTokenClassifierBase
-from ..mapper.laylmstruct import image_to_layoutlm_features
-from ..utils.detection_types import JsonDict
-from ..utils.file_utils import transformers_available
+from ..extern.base import SequenceClassResult
+from ..mapper.laylmstruct import image_to_layoutlm_features, image_to_lm_features
 from ..utils.settings import BioTag, LayoutType, ObjectTypes, PageType, TokenClasses, WordType
-from .base import LanguageModelPipelineComponent
+from .base import MetaAnnotation, PipelineComponent
 from .registry import pipeline_component_registry
 
-if transformers_available():
-    from transformers import LayoutLMTokenizerFast, RobertaTokenizerFast, XLMRobertaTokenizerFast
-
-    _ARCHITECTURES_TO_TOKENIZER = {
-        ("LayoutLMForTokenClassification", False): LayoutLMTokenizerFast.from_pretrained(
-            "microsoft/layoutlm-base-uncased"
-        ),
-        ("LayoutLMForSequenceClassification", False): LayoutLMTokenizerFast.from_pretrained(
-            "microsoft/layoutlm-base-uncased"
-        ),
-        ("LayoutLMv2ForTokenClassification", False): LayoutLMTokenizerFast.from_pretrained(
-            "microsoft/layoutlm-base-uncased"
-        ),
-        ("LayoutLMv2ForSequenceClassification", False): LayoutLMTokenizerFast.from_pretrained(
-            "microsoft/layoutlm-base-uncased"
-        ),
-        ("LayoutLMv2ForTokenClassification", True): XLMRobertaTokenizerFast.from_pretrained("xlm-roberta-base"),
-        ("LayoutLMv2ForSequenceClassification", True): XLMRobertaTokenizerFast.from_pretrained("xlm-roberta-base"),
-        ("LayoutLMv3ForSequenceClassification", False): RobertaTokenizerFast.from_pretrained(
-            "roberta-base", add_prefix_space=True
-        ),
-        ("LayoutLMv3ForTokenClassification", False): RobertaTokenizerFast.from_pretrained(
-            "roberta-base", add_prefix_space=True
-        ),
-    }
-
-
-def get_tokenizer_from_architecture(architecture_name: str, use_xlm_tokenizer: bool) -> Any:
-    """
-    We do not use the tokenizer for a particular model that the transformer library provides. Thie mapping therefore
-    returns the tokenizer that should be used for a particular model.
-
-    :param architecture_name: The model as stated in the transformer library.
-    :param use_xlm_tokenizer: True if one uses the LayoutXLM. (The model cannot be distinguished from LayoutLMv2).
-    :return: Tokenizer instance to use.
-    """
-    return _ARCHITECTURES_TO_TOKENIZER[(architecture_name, use_xlm_tokenizer)]
+if TYPE_CHECKING:
+    from ..extern.hflayoutlm import LayoutSequenceModels, LayoutTokenModels
 
 
 @pipeline_component_registry.register("LMTokenClassifierService")
-class LMTokenClassifierService(LanguageModelPipelineComponent):
+class LMTokenClassifierService(PipelineComponent):
     """
     Pipeline component for token classification
 
@@ -103,7 +67,7 @@ class LMTokenClassifierService(LanguageModelPipelineComponent):
     def __init__(
         self,
         tokenizer: Any,
-        language_model: HFLayoutLmTokenClassifierBase,
+        language_model: LayoutTokenModels,
         padding: Literal["max_length", "do_not_pad", "longest"] = "max_length",
         truncation: bool = True,
         return_overflowing_tokens: bool = False,
@@ -147,14 +111,16 @@ class LMTokenClassifierService(LanguageModelPipelineComponent):
         self.segment_positions = segment_positions
         self.sliding_window_stride = sliding_window_stride
         if self.use_other_as_default_category:
-            categories_name_as_key = {val: key for key, val in self.language_model.categories.items()}
+            categories_name_as_key = {val: key for key, val in self.language_model.categories.categories.items()}
             self.default_key: ObjectTypes
-            if BioTag.outside in categories_name_as_key:
-                self.default_key = BioTag.outside
+            if BioTag.OUTSIDE in categories_name_as_key:
+                self.default_key = BioTag.OUTSIDE
             else:
-                self.default_key = TokenClasses.other
+                self.default_key = TokenClasses.OTHER
             self.other_name_as_key = {self.default_key: categories_name_as_key[self.default_key]}
-        super().__init__(self._get_name(), tokenizer, image_to_layoutlm_features)
+        self.tokenizer = tokenizer
+        self.mapping_to_lm_input_func = self.image_to_features_func(self.language_model.image_to_features_mapping())
+        super().__init__(self._get_name(), self.language_model.model_id)
         self.required_kwargs = {
             "tokenizer": self.tokenizer,
             "padding": self.padding,
@@ -164,7 +130,7 @@ class LMTokenClassifierService(LanguageModelPipelineComponent):
             "segment_positions": self.segment_positions,
             "sliding_window_stride": self.sliding_window_stride,
         }
-        self.required_kwargs.update(self.language_model.default_kwargs_for_input_mapping())
+        self.required_kwargs.update(self.language_model.default_kwargs_for_image_to_features_mapping())
         self._init_sanity_checks()
 
     def serve(self, dp: Image) -> None:
@@ -182,7 +148,7 @@ class LMTokenClassifierService(LanguageModelPipelineComponent):
             and not token.token.startswith("##")
         ]
 
-        words_populated: List[str] = []
+        words_populated: list[str] = []
         for token in lm_output:
             if token.uuid not in words_populated:
                 if token.class_name == token.semantic_name:
@@ -190,38 +156,40 @@ class LMTokenClassifierService(LanguageModelPipelineComponent):
                 else:
                     token_class_name_id = None
                 self.dp_manager.set_category_annotation(
-                    token.semantic_name, token_class_name_id, WordType.token_class, token.uuid
+                    token.semantic_name, token_class_name_id, WordType.TOKEN_CLASS, token.uuid, token.score
                 )
-                self.dp_manager.set_category_annotation(token.bio_tag, None, WordType.tag, token.uuid)
+                self.dp_manager.set_category_annotation(token.bio_tag, None, WordType.TAG, token.uuid)
                 self.dp_manager.set_category_annotation(
-                    token.class_name, token.class_id, WordType.token_tag, token.uuid
+                    token.class_name, token.class_id, WordType.TOKEN_TAG, token.uuid, token.score
                 )
                 words_populated.append(token.uuid)
 
         if self.use_other_as_default_category:
-            word_anns = dp.get_annotation(LayoutType.word)
+            word_anns = dp.get_annotation(LayoutType.WORD)
             for word in word_anns:
-                if WordType.token_class not in word.sub_categories:
+                if WordType.TOKEN_CLASS not in word.sub_categories:
                     self.dp_manager.set_category_annotation(
-                        TokenClasses.other,
+                        TokenClasses.OTHER,
                         self.other_name_as_key[self.default_key],
-                        WordType.token_class,
+                        WordType.TOKEN_CLASS,
                         word.annotation_id,
                     )
-                if WordType.tag not in word.sub_categories:
-                    self.dp_manager.set_category_annotation(BioTag.outside, None, WordType.tag, word.annotation_id)
-                if WordType.token_tag not in word.sub_categories:
+                if WordType.TAG not in word.sub_categories:
+                    self.dp_manager.set_category_annotation(BioTag.OUTSIDE, None, WordType.TAG, word.annotation_id)
+                if WordType.TOKEN_TAG not in word.sub_categories:
                     self.dp_manager.set_category_annotation(
                         self.default_key,
                         self.other_name_as_key[self.default_key],
-                        WordType.token_tag,
+                        WordType.TOKEN_TAG,
                         word.annotation_id,
                     )
 
-    def clone(self) -> "LMTokenClassifierService":
+    def clone(self) -> LMTokenClassifierService:
+        # ToDo: replace copying of tokenizer with a proper clone method. Otherwise we cannot run the evaluation with
+        # multiple threads
         return self.__class__(
             copy(self.tokenizer),
-            self.language_model.clone(),
+            self.language_model.clone(),  # type: ignore
             self.padding,
             self.truncation,
             self.return_overflowing_tokens,
@@ -230,36 +198,38 @@ class LMTokenClassifierService(LanguageModelPipelineComponent):
             self.sliding_window_stride,
         )
 
-    def get_meta_annotation(self) -> JsonDict:
-        return dict(
-            [
-                ("image_annotations", []),
-                ("sub_categories", {LayoutType.word: {WordType.token_class, WordType.tag, WordType.token_tag}}),
-                ("relationships", {}),
-                ("summaries", []),
-            ]
+    def get_meta_annotation(self) -> MetaAnnotation:
+        return MetaAnnotation(
+            image_annotations=(),
+            sub_categories={LayoutType.WORD: {WordType.TOKEN_CLASS, WordType.TAG, WordType.TOKEN_TAG}},
+            relationships={},
+            summaries=(),
         )
 
     def _get_name(self) -> str:
         return f"lm_token_class_{self.language_model.name}"
 
     def _init_sanity_checks(self) -> None:
-        tokenizer_class = self.language_model.model.config.tokenizer_class
-        use_xlm_tokenizer = False
-        if tokenizer_class is not None:
-            use_xlm_tokenizer = True
-        tokenizer_reference = get_tokenizer_from_architecture(
-            self.language_model.model.__class__.__name__, use_xlm_tokenizer
-        )
-        if not isinstance(self.tokenizer, type(tokenizer_reference)):
-            raise ValueError(
-                f"You want to use {type(self.tokenizer)} but you should use {type(tokenizer_reference)} "
+        tokenizer_class_name = self.language_model.model.config.tokenizer_class
+        if tokenizer_class_name != self.tokenizer.__class__.__name__:
+            raise TypeError(
+                f"You want to use {type(self.tokenizer)} but you should use {tokenizer_class_name} "
                 f"in this framework"
             )
 
+    @staticmethod
+    def image_to_features_func(mapping_str: str) -> Callable[..., Callable[[Image], Optional[Any]]]:
+        """Replacing eval functions"""
+        return {"image_to_layoutlm_features": image_to_layoutlm_features, "image_to_lm_features": image_to_lm_features}[
+            mapping_str
+        ]
+
+    def clear_predictor(self) -> None:
+        self.language_model.clear_model()
+
 
 @pipeline_component_registry.register("LMSequenceClassifierService")
-class LMSequenceClassifierService(LanguageModelPipelineComponent):
+class LMSequenceClassifierService(PipelineComponent):
     """
     Pipeline component for sequence classification
 
@@ -291,10 +261,11 @@ class LMSequenceClassifierService(LanguageModelPipelineComponent):
     def __init__(
         self,
         tokenizer: Any,
-        language_model: HFLayoutLmSequenceClassifierBase,
+        language_model: LayoutSequenceModels,
         padding: Literal["max_length", "do_not_pad", "longest"] = "max_length",
         truncation: bool = True,
         return_overflowing_tokens: bool = False,
+        use_other_as_default_category: bool = False
     ) -> None:
         """
         :param tokenizer: Tokenizer, typing allows currently anything. This will be changed in the future
@@ -310,12 +281,19 @@ class LMSequenceClassifierService(LanguageModelPipelineComponent):
         :param return_overflowing_tokens: If a sequence (due to a truncation strategy) overflows the overflowing tokens
                            can be returned as an additional batch element. Not that in this case, the number of input
                            batch samples will be smaller than the output batch samples.
+        :param use_other_as_default_category: When predicting document classes, it might be possible that some pages
+                           do not get sent to the model because they are empty. If set to `True` it
+                           will assign images with no features the category `TokenClasses.OTHER`.
+
         """
         self.language_model = language_model
         self.padding = padding
         self.truncation = truncation
         self.return_overflowing_tokens = return_overflowing_tokens
-        super().__init__(self._get_name(), tokenizer, image_to_layoutlm_features)
+        self.use_other_as_default_category = use_other_as_default_category
+        self.tokenizer = tokenizer
+        self.mapping_to_lm_input_func = self.image_to_features_func(self.language_model.image_to_features_mapping())
+        super().__init__(self._get_name(), self.language_model.model_id)
         self.required_kwargs = {
             "tokenizer": self.tokenizer,
             "padding": self.padding,
@@ -323,50 +301,57 @@ class LMSequenceClassifierService(LanguageModelPipelineComponent):
             "return_overflowing_tokens": self.return_overflowing_tokens,
             "return_tensors": "pt",
         }
-        self.required_kwargs.update(self.language_model.default_kwargs_for_input_mapping())
+        self.required_kwargs.update(self.language_model.default_kwargs_for_image_to_features_mapping())
         self._init_sanity_checks()
 
     def serve(self, dp: Image) -> None:
         lm_input = self.mapping_to_lm_input_func(**self.required_kwargs)(dp)
+        lm_output = None
         if lm_input is None:
-            return
-        lm_output = self.language_model.predict(**lm_input)
-        self.dp_manager.set_summary_annotation(
-            PageType.document_type, lm_output.class_name, lm_output.class_id, None, lm_output.score
-        )
+            if self.use_other_as_default_category:
+                class_id = self.language_model.categories.get_categories(as_dict=True,
+                                                                         name_as_key=True).get(TokenClasses.OTHER, 1)
+                lm_output = SequenceClassResult(class_name=TokenClasses.OTHER,
+                                                class_id = class_id,
+                                                score=-1.)
+        else:
+            lm_output = self.language_model.predict(**lm_input)
+        if lm_output:
+            self.dp_manager.set_summary_annotation(
+                PageType.DOCUMENT_TYPE, lm_output.class_name, lm_output.class_id, None, lm_output.score
+            )
 
-    def clone(self) -> "LMSequenceClassifierService":
+    def clone(self) -> LMSequenceClassifierService:
         return self.__class__(
             copy(self.tokenizer),
-            self.language_model.clone(),
+            self.language_model.clone(),  # type: ignore
             self.padding,
             self.truncation,
             self.return_overflowing_tokens,
         )
 
-    def get_meta_annotation(self) -> JsonDict:
-        return dict(
-            [
-                ("image_annotations", []),
-                ("sub_categories", {}),
-                ("relationships", {}),
-                ("summaries", [PageType.document_type]),
-            ]
+    def get_meta_annotation(self) -> MetaAnnotation:
+        return MetaAnnotation(
+            image_annotations=(), sub_categories={}, relationships={}, summaries=(PageType.DOCUMENT_TYPE,)
         )
 
     def _get_name(self) -> str:
         return f"lm_sequence_class_{self.language_model.name}"
 
     def _init_sanity_checks(self) -> None:
-        tokenizer_class = self.language_model.model.config.tokenizer_class
-        use_xlm_tokenizer = False
-        if tokenizer_class is not None:
-            use_xlm_tokenizer = True
-        tokenizer_reference = get_tokenizer_from_architecture(
-            self.language_model.model.__class__.__name__, use_xlm_tokenizer
-        )
-        if not isinstance(self.tokenizer, type(tokenizer_reference)):
-            raise ValueError(
-                f"You want to use {type(self.tokenizer)} but you should use {type(tokenizer_reference)} "
+        tokenizer_class_name = self.language_model.model.config.tokenizer_class
+        if tokenizer_class_name != self.tokenizer.__class__.__name__:
+            raise TypeError(
+                f"You want to use {type(self.tokenizer)} but you should use {tokenizer_class_name} "
                 f"in this framework"
             )
+
+    @staticmethod
+    def image_to_features_func(mapping_str: str) -> Callable[..., Callable[[Image], Optional[Any]]]:
+        """Replacing eval functions"""
+        return {"image_to_layoutlm_features": image_to_layoutlm_features, "image_to_lm_features": image_to_lm_features}[
+            mapping_str
+        ]
+
+    def clear_predictor(self) -> None:
+        self.language_model.clear_model()

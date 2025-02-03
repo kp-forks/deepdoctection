@@ -26,7 +26,7 @@ from pytest import mark
 
 from deepdoctection.datapoint.image import Image
 from deepdoctection.mapper import image_to_prodigy, prodigy_to_image
-from deepdoctection.utils.detection_types import JsonDict
+from deepdoctection.utils.types import JsonDict
 
 from .data import DatapointImage, DatapointProdigy
 
@@ -67,7 +67,7 @@ def test_image_to_prodigy(datapoint_image: Image, image_results: DatapointImage)
     """
 
     # Act
-    output = image_to_prodigy(datapoint_image)
+    output = image_to_prodigy()(datapoint_image)  # pylint: disable=E1102
 
     # Assert
     datapoint = image_results

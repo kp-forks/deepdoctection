@@ -18,10 +18,14 @@
 """
 Module for ordering text and layout segments pipeline components
 """
+from __future__ import annotations
 
+import os
+from abc import ABC
 from copy import copy
 from itertools import chain
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from logging import DEBUG
+from typing import Any, Optional, Sequence, Union
 
 import numpy as np
 
@@ -31,9 +35,9 @@ from ..datapoint.image import Image
 from ..datapoint.view import IMAGE_DEFAULTS
 from ..extern.base import DetectionResult
 from ..extern.tp.tpfrcnn.utils.np_box_ops import ioa as np_ioa
-from ..pipe.base import PipelineComponent
+from ..pipe.base import MetaAnnotation, PipelineComponent
 from ..pipe.registry import pipeline_component_registry
-from ..utils.detection_types import JsonDict
+from ..utils.logger import LoggingRecord, logger
 from ..utils.settings import LayoutType, ObjectTypes, Relationships, TypeOrStr, get_type
 
 
@@ -60,11 +64,12 @@ class OrderGenerator:
         self.broken_line_tolerance = broken_line_tolerance
         self.height_tolerance = height_tolerance
         self.ioa_column_threshold = 0.9
+        self.columns_detect_result: Optional[Sequence[DetectionResult]] = None
 
     @staticmethod
     def group_words_into_lines(
         word_anns: Sequence[ImageAnnotation], image_id: Optional[str] = None
-    ) -> List[Tuple[int, int, str]]:
+    ) -> list[tuple[int, int, str]]:
         """Arranging words into horizontal text lines and sorting text lines vertically in order to give
         an enumeration of words that is used for establishing the reading order. Using this reading order arragement
         makes only sense for words within a rectangle and needs to be revised in more complex appearances.
@@ -72,7 +77,7 @@ class OrderGenerator:
         id)`.
         """
         reading_lines = []
-        rows: List[Dict[str, float]] = []
+        rows: list[dict[str, float]] = []
         for word in word_anns:
             bounding_box = word.get_bounding_box(image_id)
             row_found = False
@@ -99,30 +104,38 @@ class OrderGenerator:
         }
         reading_lines.sort(key=lambda x: (rows_dict[x[0]], x[2]))
         number_rows = len(rows_dict)
+        if logger.isEnabledFor(DEBUG):
+            logger.debug(
+                LoggingRecord(
+                    "group_words_into_lines",
+                    {"number_rows": number_rows, "reading_lines": reading_lines, "rows_dict": rows_dict},
+                )
+            )
         return [(idx + 1, number_rows - word[0], word[1]) for idx, word in enumerate(reading_lines)]
 
     @staticmethod
     def group_lines_into_lines(
         line_anns: Sequence[ImageAnnotation], image_id: Optional[str] = None
-    ) -> List[Tuple[int, int, str]]:
+    ) -> list[tuple[int, int, str]]:
         """
         Sorting reading lines. Returns for a list of `ImageAnnotation` an list of tuples (each tuple containing the
         reading order and the `annotation_id` for each list element.
         :param line_anns: text line `ImageAnnotation`
         :param image_id: image_id of underyling image (to find get the bounding boxes)
-        :return: `List[(reading_order, reading_order,annotation_id)]`
+        :return: `list[(reading_order, reading_order,annotation_id)]`
         """
         reading_lines = []
         for ann in line_anns:
             bounding_box = ann.get_bounding_box(image_id)
             reading_lines.append((bounding_box.cy, ann.annotation_id))
         reading_lines.sort(key=lambda x: x[0])
+        logger.debug(LoggingRecord("group_lines_into_lines", {"reading_lines": reading_lines}))
         return [(idx + 1, idx + 1, line[1]) for idx, line in enumerate(reading_lines)]
 
     @staticmethod
-    def _connected_components(columns: List[BoundingBox]) -> List[Dict[str, Any]]:
+    def _connected_components(columns: list[BoundingBox]) -> list[dict[str, Any]]:
         # building connected components of columns
-        connected_components: List[Dict[str, Any]] = []
+        connected_components: list[dict[str, Any]] = []
         for idx, col in enumerate(columns):
             col_dict = {"id": idx, "box": col}
             component_found = False
@@ -152,12 +165,13 @@ class OrderGenerator:
 
             # finally, sorting connected components by increasing y-value
             connected_components.sort(key=lambda x: x["top"])
-
+        if logger.isEnabledFor(DEBUG):
+            logger.debug(LoggingRecord("_connected_components", {"connected_components": str(connected_components)}))
         return connected_components
 
     def order_blocks(
-        self, anns: List[ImageAnnotation], image_width: float, image_height: float, image_id: Optional[str] = None
-    ) -> Sequence[Tuple[int, str]]:
+        self, anns: list[ImageAnnotation], image_width: float, image_height: float, image_id: Optional[str] = None
+    ) -> Sequence[tuple[int, str]]:
         """
         Determining a text ordering of text blocks. These text blocks should be larger sections than barely words.
         It will first try to detect columns, then try to consolidate columns and finally try to detecting connected
@@ -169,12 +183,12 @@ class OrderGenerator:
         :param image_width: image width (to re-calculate bounding boxes into relative coords)
         :param image_height: image height (to re-calculate bounding boxes into relative coords)
         :param image_id: image id
-        :return: List of tuples with reading order position and `annotation_id`
+        :return: list of tuples with reading order position and `annotation_id`
         """
         if not anns:
             return []
         reading_blocks = []
-        columns: List[BoundingBox] = []
+        columns: list[BoundingBox] = []
         anns.sort(
             key=lambda x: (
                 x.bounding_box.transform(image_width, image_height).cy,  # type: ignore
@@ -236,8 +250,9 @@ class OrderGenerator:
                 )
                 # update the top and right with the new reading block added.
                 reading_blocks.append((len(columns) - 1, ann.annotation_id))
-
+        self.columns_detect_result = self._make_column_detect_results(columns)
         consoldiated_cols = self._consolidate_columns(columns)
+
         consolidated_columns = []
         for idx, _ in enumerate(columns):
             if columns[consoldiated_cols[idx]] not in consolidated_columns:
@@ -254,14 +269,26 @@ class OrderGenerator:
         blocks.sort(key=lambda x: x[0])  # type: ignore
         sorted_blocks = []
         max_block_number = max(list(columns_dict.values()))
-        filtered_blocks: Sequence[Tuple[int, str]]
+        filtered_blocks: Sequence[tuple[int, str]]
         for idx in range(max_block_number + 1):
             filtered_blocks = list(filter(lambda x: x[0] == idx, blocks))  # type: ignore # pylint: disable=W0640
             sorted_blocks.extend(self._sort_anns_grouped_by_blocks(filtered_blocks, anns, image_width, image_height))
         reading_blocks = [(idx + 1, block[1]) for idx, block in enumerate(sorted_blocks)]
+
+        if logger.isEnabledFor(DEBUG):
+            logger.debug(
+                LoggingRecord(
+                    "order_blocks",
+                    {
+                        "consolidated_cols": str(consoldiated_cols),
+                        "columns": str(columns),
+                        "reading_blocks": str(reading_blocks),
+                    },
+                )
+            )
         return reading_blocks
 
-    def _consolidate_columns(self, columns: List[BoundingBox]) -> Dict[int, int]:
+    def _consolidate_columns(self, columns: list[BoundingBox]) -> dict[int, int]:
         if not columns:
             return {}
         np_boxes = np.array([col.to_list(mode="xyxy") for col in columns])
@@ -270,17 +297,20 @@ class OrderGenerator:
         output = ioa_matrix > self.ioa_column_threshold
         child_index, parent_index = output.nonzero()
         column_dict = dict(zip(child_index, parent_index))
+        column_dict = {int(key): int(val) for key, val in column_dict.items()}
         counter = 0
         for idx, _ in enumerate(columns):
             if idx not in column_dict:
                 column_dict[idx] = counter
                 counter += 1
+        if logger.isEnabledFor(DEBUG):
+            logger.debug(LoggingRecord("consolidated columns", copy(column_dict)))
         return column_dict
 
     @staticmethod
     def _sort_anns_grouped_by_blocks(
-        block: Sequence[Tuple[int, str]], anns: Sequence[ImageAnnotation], image_width: float, image_height: float
-    ) -> List[Tuple[int, str]]:
+        block: Sequence[tuple[int, str]], anns: Sequence[ImageAnnotation], image_width: float, image_height: float
+    ) -> list[tuple[int, str]]:
         if not block:
             return []
         anns_and_blocks_numbers = list(zip(*block))
@@ -295,6 +325,21 @@ class OrderGenerator:
         )
         return [(block_number, ann.annotation_id) for ann in block_anns]
 
+    @staticmethod
+    def _make_column_detect_results(columns: Sequence[BoundingBox]) -> Sequence[DetectionResult]:
+        column_detect_result_list = []
+        if os.environ.get("LOG_LEVEL", "INFO") == "DEBUG":
+            for box in columns:
+                column_detect_result_list.append(
+                    DetectionResult(
+                        box=box.to_list(mode="xyxy"),
+                        absolute_coords=box.absolute_coords,
+                        class_id=99,
+                        class_name=LayoutType.COLUMN,
+                    )
+                )
+        return column_detect_result_list
+
 
 class TextLineGenerator:
     """
@@ -306,10 +351,11 @@ class TextLineGenerator:
         self, make_sub_lines: bool, line_category_id: Union[int, str], paragraph_break: Optional[float] = None
     ):
         """
-        :param make_sub_lines: Whether to build sub lines from lines
+        :param make_sub_lines: Whether to build sub lines from lines.
         :param line_category_id: category_id to give a text line
-        :param paragraph_break: threshold of two consecutive words. If distance is larger than threshold, two sublines
-                                will be built
+        :param paragraph_break: threshold of two consecutive words. If distance is larger than threshold, two sub-lines
+                                will be built. We use relative coordinates to calculate the distance between two
+                                consecutive words. A reasonable value is 0.035
         """
         if make_sub_lines and paragraph_break is None:
             raise ValueError("You must specify paragraph_break when setting make_sub_lines to True")
@@ -317,10 +363,10 @@ class TextLineGenerator:
         self.make_sub_lines = make_sub_lines
         self.paragraph_break = paragraph_break
 
-    def _make_detect_result(self, box: BoundingBox, relationships: Dict[str, List[str]]) -> DetectionResult:
+    def _make_detect_result(self, box: BoundingBox, relationships: dict[str, list[str]]) -> DetectionResult:
         return DetectionResult(
             box=box.to_list(mode="xyxy"),
-            class_name=LayoutType.line,
+            class_name=LayoutType.LINE,
             class_id=self.line_category_id,
             absolute_coords=box.absolute_coords,
             relationships=relationships,
@@ -332,6 +378,7 @@ class TextLineGenerator:
         image_width: float,
         image_height: float,
         image_id: Optional[str] = None,
+        highest_level: bool = True,
     ) -> Sequence[DetectionResult]:
         """
         Creating detecting result of lines (or sub lines) from given word type `ImageAnnotation`.
@@ -346,48 +393,20 @@ class TextLineGenerator:
             return []
         # every list now non-empty
         word_anns_dict = {ann.annotation_id: ann for ann in word_anns}
+        # list of  (word index, text line, word annotation_id)
         word_order_list = OrderGenerator.group_words_into_lines(word_anns, image_id)
         number_rows = max(word[1] for word in word_order_list)
+        if number_rows == 1 and not highest_level:
+            return []
         detection_result_list = []
-        for row in range(1, number_rows + 1):
-            ann_meta_per_row = [ann_meta for ann_meta in word_order_list if ann_meta[1] == row]
+        for number_row in range(1, number_rows + 1):
+            # list of  (word index, text line, word annotation_id) for text line equal to number_row
+            ann_meta_per_row = [ann_meta for ann_meta in word_order_list if ann_meta[1] == number_row]
             ann_ids = [ann_meta[2] for ann_meta in ann_meta_per_row]
             anns_per_row = [word_anns_dict[ann_id] for ann_id in ann_ids]
             anns_per_row.sort(key=lambda x: x.get_bounding_box(image_id).ulx)
 
-            if len(anns_per_row) >= 2 or not self.make_sub_lines:
-                # words are already sorted horizontally
-                sub_line = [anns_per_row[0]]
-                sub_line_ann_ids = [anns_per_row[0].annotation_id]
-                for idx, ann in enumerate(anns_per_row[1:]):
-                    horiz_break = True
-                    prev_box = sub_line[-1].get_bounding_box(image_id)
-                    current_box = ann.get_bounding_box(image_id)
-
-                    if prev_box.absolute_coords:
-                        prev_box = prev_box.transform(image_width, image_height)
-                    if current_box.absolute_coords:
-                        current_box = current_box.transform(image_width, image_height)
-
-                    # If distance between boxes is lower than paragraph break, same subline
-                    if current_box.ulx - prev_box.lrx < self.paragraph_break:  # type: ignore
-                        horiz_break = False
-
-                    if horiz_break or idx == len(anns_per_row) - 2:
-                        if idx == len(anns_per_row) - 2:
-                            sub_line.append(ann)
-                            sub_line_ann_ids.append(ann.annotation_id)
-
-                        boxes = [ann.get_bounding_box(image_id) for ann in sub_line]
-                        merge_box = merge_boxes(*boxes)
-                        detection_result = self._make_detect_result(merge_box, {"child": sub_line_ann_ids})
-                        detection_result_list.append(detection_result)
-                        sub_line = []
-                        sub_line_ann_ids = []
-
-                    sub_line.append(ann)
-                    sub_line_ann_ids.append(ann.annotation_id)
-            else:
+            if len(anns_per_row) < 2 or not self.make_sub_lines:
                 # either row has only one word or all words should belong to one line
                 boxes = [ann.get_bounding_box(image_id) for ann in anns_per_row]
                 merge_box = merge_boxes(*boxes)
@@ -395,12 +414,154 @@ class TextLineGenerator:
                     merge_box, {"child": [ann.annotation_id for ann in anns_per_row]}
                 )
                 detection_result_list.append(detection_result)
+            else:
+                for idx, ann in enumerate(anns_per_row):
+                    if idx == 0:
+                        sub_line = [ann]
+                        sub_line_ann_ids = [ann.annotation_id]
+                        continue
+
+                    prev_box = anns_per_row[idx - 1].get_bounding_box(image_id)
+                    current_box = ann.get_bounding_box(image_id)
+
+                    if prev_box.absolute_coords:
+                        prev_box = prev_box.transform(image_width, image_height)
+                    if current_box.absolute_coords:
+                        current_box = current_box.transform(image_width, image_height)
+
+                    # If distance between boxes is lower than paragraph break, same sub-line
+                    if current_box.ulx - prev_box.lrx < self.paragraph_break:  # type: ignore
+                        sub_line.append(ann)
+                        sub_line_ann_ids.append(ann.annotation_id)
+                    else:
+                        # We need to iterate maybe more than one time, because sub-lines may have more than one line
+                        # if having been split. Take fore example a multi-column layout where a sub-line has
+                        # two lines because of a column break and fonts twice as large as the other column.
+                        detection_results = self.create_detection_result(
+                            sub_line, image_width, image_height, image_id, False
+                        )
+                        if detection_results:
+                            detection_result_list.extend(detection_results)
+                        else:
+                            boxes = [ann.get_bounding_box(image_id) for ann in sub_line]
+                            merge_box = merge_boxes(*boxes)
+                            detection_result = self._make_detect_result(merge_box, {"child": sub_line_ann_ids})
+                            detection_result_list.append(detection_result)
+                            sub_line = [ann]
+                            sub_line_ann_ids = [ann.annotation_id]
+
+                    if idx == len(anns_per_row) - 1:
+                        detection_results = self.create_detection_result(
+                            sub_line, image_width, image_height, image_id, False
+                        )
+                        if detection_results:
+                            detection_result_list.extend(detection_results)
+                        else:
+                            boxes = [ann.get_bounding_box(image_id) for ann in sub_line]
+                            merge_box = merge_boxes(*boxes)
+                            detection_result = self._make_detect_result(merge_box, {"child": sub_line_ann_ids})
+                            detection_result_list.append(detection_result)
 
         return detection_result_list
 
 
+class TextLineServiceMixin(PipelineComponent, ABC):
+    """
+    This class is used to create text lines similar to TextOrderService.
+    It uses the logic of the TextOrderService but modifies it to suit its needs.
+    It specifically uses the _create_lines_for_words method and modifies the serve method.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        line_category_id: int = 1,
+        include_residual_text_container: bool = True,
+        paragraph_break: Optional[float] = None,
+    ):
+        """
+        Initialize the TextLineService with a line_category_id and a TextLineGenerator instance.
+        """
+        self.line_category_id = line_category_id
+        self.include_residual_text_container = include_residual_text_container
+        self.text_line_generator = TextLineGenerator(
+            self.include_residual_text_container, self.line_category_id, paragraph_break
+        )
+        super().__init__(name)
+
+    def _create_lines_for_words(self, word_anns: Sequence[ImageAnnotation]) -> Sequence[ImageAnnotation]:
+        """
+        This method creates lines for words using the TextLineGenerator instance.
+        """
+        detection_result_list = self.text_line_generator.create_detection_result(
+            word_anns,
+            self.dp_manager.datapoint.width,
+            self.dp_manager.datapoint.height,
+            self.dp_manager.datapoint.image_id,
+        )
+        line_anns = []
+        for detect_result in detection_result_list:
+            ann_id = self.dp_manager.set_image_annotation(detect_result)
+            if ann_id:
+                line_ann = self.dp_manager.get_annotation(ann_id)
+                child_ann_id_list = detect_result.relationships["child"]  # type: ignore
+                for child_ann_id in child_ann_id_list:
+                    line_ann.dump_relationship(Relationships.CHILD, child_ann_id)
+                line_anns.append(line_ann)
+        return line_anns
+
+
+class TextLineService(TextLineServiceMixin):
+    """
+    Some OCR systems do not identify lines of text but only provide text boxes for words. This is not sufficient
+    for certain applications. This service determines rule-based text lines based on word boxes. One difficulty is
+    that text lines are not continuous but are interrupted, for example in multi-column layouts.
+    These interruptions are taken into account insofar as the gap between two words on almost the same page height
+    must not be too large.
+
+    The service constructs new ImageAnnotation of the category `LayoutType.line` and forms relations between the
+    text lines and the words contained in the text lines. The reading order is not arranged.
+    """
+
+    def __init__(self, line_category_id: int = 1, paragraph_break: Optional[float] = None):
+        """
+        Initialize `TextLineService`
+
+        :param line_category_id: category_id to give a text line
+        :param paragraph_break: threshold of two consecutive words. If distance is larger than threshold, two sublines
+                                will be built
+        """
+        super().__init__(
+            name="text_line",
+            line_category_id=line_category_id,
+            include_residual_text_container=True,
+            paragraph_break=paragraph_break,
+        )
+
+    def clone(self) -> TextLineService:
+        """
+        This method returns a new instance of the class with the same configuration.
+        """
+        return self.__class__(self.line_category_id, self.text_line_generator.paragraph_break)
+
+    def serve(self, dp: Image) -> None:
+        text_container_anns = dp.get_annotation(category_names=LayoutType.WORD)
+        self._create_lines_for_words(text_container_anns)
+
+    def get_meta_annotation(self) -> MetaAnnotation:
+        """
+        This method returns metadata about the annotations created by this pipeline component.
+        """
+        return MetaAnnotation(
+            image_annotations=(LayoutType.LINE,),
+            sub_categories={LayoutType.LINE: {Relationships.CHILD}},
+            relationships={},
+            summaries=(),
+        )
+
+
 @pipeline_component_registry.register("TextOrderService")
-class TextOrderService(PipelineComponent):
+class TextOrderService(TextLineServiceMixin):
     """
     Reading order of words within floating text blocks as well as reading order of blocks within simple text blocks.
     To understand the difference between floating text blocks and simple text blocks consider a page containing an
@@ -425,7 +586,8 @@ class TextOrderService(PipelineComponent):
     A category annotation per word is generated, which fixes the order per word in the block, as well as a category
     annotation per block, which saves the reading order of the block per page.
 
-    The blocks are defined in `_floating_text_block_names` and text blocks in `_floating_text_block_names`.
+    The blocks are defined in `text_block_categories` and text blocks that should be considered when generating
+    narrative text must be added in `floating_text_block_categories`.
 
         order = TextOrderService(text_container="word",
                                  text_block_categories=["title", "text", "list", "cell",
@@ -462,26 +624,38 @@ class TextOrderService(PipelineComponent):
                                                 text block annotations.) Setting `include_residual_text_container=True`
                                                 will build synthetic text lines from text containers and regard these
                                                 text lines as floating text blocks.
+        :param starting_point_tolerance: Threshold to identify if two text blocks belong to one column: To check if two
+                                         text blocks belong to the same column, one condition says, that
+                                         x-coordinates of vertices should not differ more than this threshold
+        :param broken_line_tolerance: Threshold to identify if two consecutive words belonging to one line should be
+                                      in two different sub-lines (because they belong to two different text columns).
+        :param height_tolerance: Threshold to identify if two columns lying over each other belong together or need to
+                                 be separated. Scaling factor of relative text block height.
         """
         self.text_container = get_type(text_container)
         if isinstance(text_block_categories, (str, ObjectTypes)):
-            text_block_categories = [text_block_categories]
+            text_block_categories = (get_type(text_block_categories),)
         if text_block_categories is None:
             text_block_categories = IMAGE_DEFAULTS["text_block_categories"]
-        self.text_block_categories = [get_type(category) for category in text_block_categories]
+        self.text_block_categories = tuple((get_type(category) for category in text_block_categories))
         if isinstance(floating_text_block_categories, (str, ObjectTypes)):
-            floating_text_block_categories = [floating_text_block_categories]
+            floating_text_block_categories = (get_type(floating_text_block_categories),)
         if floating_text_block_categories is None:
             floating_text_block_categories = IMAGE_DEFAULTS["floating_text_block_categories"]
-        self.floating_text_block_categories = [get_type(category) for category in floating_text_block_categories]
+        self.floating_text_block_categories = tuple((get_type(category) for category in floating_text_block_categories))
         if include_residual_text_container:
-            self.floating_text_block_categories.append(LayoutType.line)
+            self.floating_text_block_categories = self.floating_text_block_categories + (LayoutType.LINE,)
         self.include_residual_text_container = include_residual_text_container
         self.order_generator = OrderGenerator(starting_point_tolerance, broken_line_tolerance, height_tolerance)
         self.text_line_generator = TextLineGenerator(
             self.include_residual_text_container, line_category_id, paragraph_break
         )
-        super().__init__("text_order")
+        super().__init__(
+            name="text_order",
+            line_category_id=line_category_id,
+            include_residual_text_container=include_residual_text_container,
+            paragraph_break=paragraph_break,
+        )
         self._init_sanity_checks()
 
     def serve(self, dp: Image) -> None:
@@ -489,12 +663,12 @@ class TextOrderService(PipelineComponent):
         text_block_anns = dp.get_annotation(category_names=self.text_block_categories)
         if self.include_residual_text_container:
             mapped_text_container_ids = list(
-                chain(*[text_block.get_relationship(Relationships.child) for text_block in text_block_anns])
+                chain(*[text_block.get_relationship(Relationships.CHILD) for text_block in text_block_anns])
             )
             residual_text_container_anns = [
                 ann for ann in text_container_anns if ann.annotation_id not in mapped_text_container_ids
             ]
-            if self.text_container == LayoutType.word:
+            if self.text_container == LayoutType.WORD:
                 text_block_anns.extend(self._create_lines_for_words(residual_text_container_anns))
             else:
                 text_block_anns.extend(residual_text_container_anns)
@@ -504,24 +678,16 @@ class TextOrderService(PipelineComponent):
             ann for ann in text_block_anns if ann.category_name in self.floating_text_block_categories
         ]
         self.order_blocks(floating_text_block_anns_to_order)
+        self._create_columns()
 
-    def _create_lines_for_words(self, word_anns: Sequence[ImageAnnotation]) -> Sequence[ImageAnnotation]:
-        detection_result_list = self.text_line_generator.create_detection_result(
-            word_anns,
-            self.dp_manager.datapoint.width,
-            self.dp_manager.datapoint.height,
-            self.dp_manager.datapoint.image_id,
-        )
-        line_anns = []
-        for detect_result in detection_result_list:
-            ann_id = self.dp_manager.set_image_annotation(detect_result)
-            if ann_id:
-                line_ann = self.dp_manager.get_annotation(ann_id)
-                child_ann_id_list = detect_result.relationships["child"]  # type: ignore
-                for child_ann_id in child_ann_id_list:
-                    line_ann.dump_relationship(Relationships.child, child_ann_id)
-                line_anns.append(line_ann)
-        return line_anns
+    def _create_columns(self) -> None:
+        if logger.isEnabledFor(DEBUG) and self.order_generator.columns_detect_result:
+            for idx, detect_result in enumerate(self.order_generator.columns_detect_result):
+                annotation_id = self.dp_manager.set_image_annotation(detect_result)
+                if annotation_id:
+                    self.dp_manager.set_category_annotation(
+                        Relationships.READING_ORDER, idx, Relationships.READING_ORDER, annotation_id
+                    )
 
     def order_text_in_text_block(self, text_block_ann: ImageAnnotation) -> None:
         """
@@ -530,11 +696,11 @@ class TextOrderService(PipelineComponent):
 
         :param text_block_ann: text block annotation (category one of `text_block_categories`).
         """
-        text_container_ids = text_block_ann.get_relationship(Relationships.child)
+        text_container_ids = text_block_ann.get_relationship(Relationships.CHILD)
         text_container_ann = self.dp_manager.datapoint.get_annotation(
             annotation_ids=text_container_ids, category_names=self.text_container
         )
-        if self.text_container == LayoutType.word:
+        if self.text_container == LayoutType.WORD:
             word_order_list = self.order_generator.group_words_into_lines(
                 text_container_ann, self.dp_manager.datapoint.image_id
             )
@@ -544,10 +710,10 @@ class TextOrderService(PipelineComponent):
             )
         for word_order in word_order_list:
             self.dp_manager.set_category_annotation(
-                Relationships.reading_order, word_order[0], Relationships.reading_order, word_order[2]
+                Relationships.READING_ORDER, word_order[0], Relationships.READING_ORDER, word_order[2]
             )
 
-    def order_blocks(self, text_block_anns: List[ImageAnnotation]) -> None:
+    def order_blocks(self, text_block_anns: list[ImageAnnotation]) -> None:
         """
         Ordering of text blocks. Will use the internal order generator.
 
@@ -558,42 +724,40 @@ class TextOrderService(PipelineComponent):
         )
         for word_order in block_order_list:
             self.dp_manager.set_category_annotation(
-                Relationships.reading_order, word_order[0], Relationships.reading_order, word_order[1]
+                Relationships.READING_ORDER, word_order[0], Relationships.READING_ORDER, word_order[1]
             )
 
     def _init_sanity_checks(self) -> None:
-        assert self.text_container in (LayoutType.word, LayoutType.line), (
-            f"text_container must be either {LayoutType.word} or " f"{LayoutType.line}"
+        assert self.text_container in (LayoutType.WORD, LayoutType.LINE), (
+            f"text_container must be either {LayoutType.WORD} or " f"{LayoutType.LINE}"
         )
         add_category = []
         if self.include_residual_text_container:
-            add_category.append(LayoutType.line)
+            add_category.append(LayoutType.LINE)
 
         assert set(self.floating_text_block_categories) <= set(
-            self.text_block_categories + add_category  # type: ignore
+            self.text_block_categories + tuple(add_category)
         ), "floating_text_block_categories must be a subset of text_block_categories"
 
-    def get_meta_annotation(self) -> JsonDict:
+    def get_meta_annotation(self) -> MetaAnnotation:
         add_category = [self.text_container]
-        image_annotations = []
-        if self.include_residual_text_container and self.text_container == LayoutType.word:
-            add_category.append(LayoutType.line)
-            image_annotations.append(LayoutType.line)
+        image_annotations: list[ObjectTypes] = []
+        if self.include_residual_text_container and self.text_container == LayoutType.WORD:
+            add_category.append(LayoutType.LINE)
+            image_annotations.append(LayoutType.LINE)
         anns_with_reading_order = list(copy(self.floating_text_block_categories)) + add_category
-        return dict(
-            [
-                ("image_annotations", image_annotations),
-                ("sub_categories", {category: {Relationships.reading_order} for category in anns_with_reading_order}),
-                ("relationships", {}),
-                ("summaries", []),
-            ]
+        return MetaAnnotation(
+            image_annotations=tuple(image_annotations),
+            sub_categories={category: {Relationships.READING_ORDER} for category in anns_with_reading_order},
+            relationships={},
+            summaries=(),
         )
 
-    def clone(self) -> PipelineComponent:
+    def clone(self) -> TextOrderService:
         return self.__class__(
-            copy(self.text_container),
-            copy(self.text_block_categories),
-            copy(self.floating_text_block_categories),
+            self.text_container,
+            self.text_block_categories,
+            self.floating_text_block_categories,
             self.include_residual_text_container,
             self.order_generator.starting_point_tolerance,
             self.order_generator.broken_line_tolerance,
@@ -601,3 +765,6 @@ class TextOrderService(PipelineComponent):
             self.text_line_generator.paragraph_break,
             self.text_line_generator.line_category_id,
         )
+
+    def clear_predictor(self) -> None:
+        pass

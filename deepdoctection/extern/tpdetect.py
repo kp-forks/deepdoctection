@@ -18,25 +18,59 @@
 """
 TP Faster RCNN model as predictor for deepdoctection pipeline
 """
+from __future__ import annotations
 
-from copy import copy
+from abc import ABC
 from pathlib import Path
-from typing import List, Mapping, Optional, Sequence, Union
+from typing import Mapping, Optional, Sequence, Union
 
-from ..utils.detection_types import ImageType, Requirement
-from ..utils.file_utils import get_tensorflow_requirement, get_tensorpack_requirement, tensorpack_available
+from ..utils.file_utils import get_tensorflow_requirement, get_tensorpack_requirement
 from ..utils.metacfg import set_config_by_yaml
-from ..utils.settings import ObjectTypes, TypeOrStr, get_type
-from .base import DetectionResult, ObjectDetector, PredictorBase
+from ..utils.settings import DefaultType, ObjectTypes, TypeOrStr, get_type
+from ..utils.types import PathLikeOrStr, PixelValues, Requirement
+from .base import DetectionResult, ModelCategories, ObjectDetector
+from .tp.tpcompat import TensorpackPredictor
+from .tp.tpfrcnn.config.config import model_frcnn_config
+from .tp.tpfrcnn.modeling.generalized_rcnn import ResNetFPNModel
+from .tp.tpfrcnn.predict import tp_predict_image
 
-if tensorpack_available():
-    from .tp.tpcompat import TensorpackPredictor
-    from .tp.tpfrcnn.config.config import model_frcnn_config
-    from .tp.tpfrcnn.modeling.generalized_rcnn import ResNetFPNModel
-    from .tp.tpfrcnn.predict import tp_predict_image
+
+class TPFrcnnDetectorMixin(ObjectDetector, ABC):
+    """Base class for TP FRCNN detector. This class only implements the basic wrapper functions"""
+
+    def __init__(self, categories: Mapping[int, TypeOrStr], filter_categories: Optional[Sequence[TypeOrStr]] = None):
+        categories = {k: get_type(v) for k, v in categories.items()}
+        categories.update({0: get_type("background")})
+        self.categories = ModelCategories(categories)
+        if filter_categories:
+            self.categories.filter_categories = tuple(get_type(cat) for cat in filter_categories)
+
+    def _map_category_names(self, detection_results: list[DetectionResult]) -> list[DetectionResult]:
+        """
+        Populating category names to detection results
+
+        :param detection_results: list of detection results
+        :return: List of detection results with attribute class_name populated
+        """
+        filtered_detection_result: list[DetectionResult] = []
+        for result in detection_results:
+            result.class_name = self.categories.categories.get(
+                result.class_id if result.class_id else -1, DefaultType.DEFAULT_TYPE
+            )
+            if result.class_name != DefaultType.DEFAULT_TYPE:
+                filtered_detection_result.append(result)
+        return filtered_detection_result
+
+    @staticmethod
+    def get_name(path_weights: PathLikeOrStr, architecture: str) -> str:
+        """Returns the name of the model"""
+        return f"Tensorpack_{architecture}" + "_".join(Path(path_weights).parts[-2:])
+
+    def get_category_names(self) -> tuple[ObjectTypes, ...]:
+        return self.categories.get_categories(as_dict=False)
 
 
-class TPFrcnnDetector(TensorpackPredictor, ObjectDetector):
+class TPFrcnnDetector(TensorpackPredictor, TPFrcnnDetectorMixin):
     """
     Tensorpack Faster-RCNN implementation with FPN and optional Cascade-RCNN. The backbones Resnet-50, Resnet-101 and
     their Resnext counterparts are also available. Normalization options (group normalization, synchronized batch
@@ -59,10 +93,10 @@ class TPFrcnnDetector(TensorpackPredictor, ObjectDetector):
 
     def __init__(
         self,
-        path_yaml: str,
-        path_weights: str,
-        categories: Mapping[str, TypeOrStr],
-        config_overwrite: Optional[List[str]] = None,
+        path_yaml: PathLikeOrStr,
+        path_weights: PathLikeOrStr,
+        categories: Mapping[int, TypeOrStr],
+        config_overwrite: Optional[list[str]] = None,
         ignore_mismatch: bool = False,
         filter_categories: Optional[Sequence[TypeOrStr]] = None,
     ):
@@ -87,20 +121,19 @@ class TPFrcnnDetector(TensorpackPredictor, ObjectDetector):
         :param filter_categories: The model might return objects that are not supposed to be predicted and that should
                                   be filtered. Pass a list of category names that must not be returned
         """
-        self.name = "_".join(Path(path_weights).parts[-3:])
-        self.path_yaml = path_yaml
-        self.categories = copy(categories)  # type: ignore
+        self.path_yaml = Path(path_yaml)
         self.config_overwrite = config_overwrite
-        if filter_categories:
-            filter_categories = [get_type(cat) for cat in filter_categories]
-        self.filter_categories = filter_categories
-        model = TPFrcnnDetector.set_model(path_yaml, self.categories, config_overwrite)
-        super().__init__(model, path_weights, ignore_mismatch)
-        assert self._number_gpus > 0, "Model only support inference with GPU"
+
+        model = TPFrcnnDetector.get_wrapped_model(path_yaml, categories, config_overwrite)
+        TensorpackPredictor.__init__(self, model, path_weights, ignore_mismatch)
+        TPFrcnnDetectorMixin.__init__(self, categories, filter_categories)
+
+        self.name = self.get_name(path_weights, self._model.cfg.TAG)
+        self.model_id = self.get_model_id()
 
     @staticmethod
-    def set_model(
-        path_yaml: str, categories: Mapping[str, ObjectTypes], config_overwrite: Union[List[str], None]
+    def get_wrapped_model(
+        path_yaml: PathLikeOrStr, categories: Mapping[int, TypeOrStr], config_overwrite: Union[list[str], None]
     ) -> ResNetFPNModel:
         """
         Calls all necessary methods to build TP ResNetFPNModel
@@ -122,7 +155,7 @@ class TPFrcnnDetector(TensorpackPredictor, ObjectDetector):
         model_frcnn_config(config=hyper_param_config, categories=categories, print_summary=False)
         return ResNetFPNModel(config=hyper_param_config)
 
-    def predict(self, np_img: ImageType) -> List[DetectionResult]:
+    def predict(self, np_img: PixelValues) -> list[DetectionResult]:
         """
         Prediction per image.
 
@@ -138,33 +171,19 @@ class TPFrcnnDetector(TensorpackPredictor, ObjectDetector):
         )
         return self._map_category_names(detection_results)
 
-    def _map_category_names(self, detection_results: List[DetectionResult]) -> List[DetectionResult]:
-        """
-        Populating category names to detection results
-
-        :param detection_results: list of detection results
-        :return: List of detection results with attribute class_name populated
-        """
-        filtered_detection_result: List[DetectionResult] = []
-        for result in detection_results:
-            result.class_name = self._model.cfg.DATA.CLASS_DICT[str(result.class_id)]
-            if self.filter_categories:
-                if result.class_name not in self.filter_categories:
-                    filtered_detection_result.append(result)
-            else:
-                filtered_detection_result.append(result)
-        return filtered_detection_result
-
     @classmethod
-    def get_requirements(cls) -> List[Requirement]:
+    def get_requirements(cls) -> list[Requirement]:
         return [get_tensorflow_requirement(), get_tensorpack_requirement()]
 
-    def clone(self) -> PredictorBase:
+    def clone(self) -> TPFrcnnDetector:
         return self.__class__(
-            self.path_yaml,
-            self.path_weights,
-            self.categories,
-            self.config_overwrite,
-            self.ignore_mismatch,
-            self.filter_categories,
+            path_yaml=self.path_yaml,
+            path_weights=self.path_weights,
+            categories=dict(self.categories.get_categories()),
+            config_overwrite=self.config_overwrite,
+            ignore_mismatch=self.ignore_mismatch,
+            filter_categories=self.categories.filter_categories,
         )
+
+    def clear_model(self) -> None:
+        self.tp_predictor = None

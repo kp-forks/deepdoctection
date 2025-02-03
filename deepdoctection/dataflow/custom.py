@@ -21,14 +21,15 @@ from
 
 <https://github.com/tensorpack/dataflow/blob/master/dataflow/dataflow/common.py>
 """
-from typing import Any, Callable, Iterable, Iterator, List, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 import numpy as np
 
-from ..utils.logger import logger
+from ..utils.error import DataFlowResetStateNotCalledError
+from ..utils.logger import LoggingRecord, logger
 from ..utils.tqdm import get_tqdm
 from ..utils.utils import get_rng
-from .base import DataFlow, DataFlowReentrantGuard, DataFlowResetStateNotCalled, ProxyDataFlow
+from .base import DataFlow, DataFlowReentrantGuard, ProxyDataFlow
 from .serialize import DataFromIterable, DataFromList
 
 __all__ = ["CacheData", "CustomDataFromList", "CustomDataFromIterable"]
@@ -53,7 +54,7 @@ class CacheData(ProxyDataFlow):
         :param shuffle: whether to shuffle the cache before yielding from it.
         """
         self.shuffle = shuffle
-        self.buffer: List[Any] = []
+        self.buffer: list[Any] = []
         self._guard: Optional[DataFlowReentrantGuard] = None
         self.rng = get_rng(self)
         super().__init__(df)
@@ -65,7 +66,7 @@ class CacheData(ProxyDataFlow):
 
     def __iter__(self) -> Iterator[Any]:
         if self._guard is None:
-            raise DataFlowResetStateNotCalled()
+            raise DataFlowResetStateNotCalledError()
 
         with self._guard:
             if self.buffer:
@@ -77,7 +78,7 @@ class CacheData(ProxyDataFlow):
                     yield dp
                     self.buffer.append(dp)
 
-    def get_cache(self) -> List[Any]:
+    def get_cache(self) -> list[Any]:
         """
         get the cache of the whole dataflow as a list
 
@@ -114,10 +115,10 @@ class CustomDataFromList(DataFromList):
 
     def __init__(
         self,
-        lst: List[Any],
+        lst: list[Any],
         shuffle: bool = False,
         max_datapoints: Optional[int] = None,
-        rebalance_func: Optional[Callable[[List[Any]], List[Any]]] = None,
+        rebalance_func: Optional[Callable[[list[Any]], list[Any]]] = None,
     ):
         """
         :param lst: the input list. Each element represents a datapoint.
@@ -139,10 +140,10 @@ class CustomDataFromList(DataFromList):
 
     def __iter__(self) -> Iterator[Any]:
         if self.rng is None:
-            raise DataFlowResetStateNotCalled()
+            raise DataFlowResetStateNotCalledError()
         if self.rebalance_func is not None:
             lst_tmp = self.rebalance_func(self.lst)
-            logger.info("subset size after re-balancing: %s", len(lst_tmp))
+            logger.info(LoggingRecord(f"CustomDataFromList: subset size after re-balancing: {len(lst_tmp)}"))
         else:
             lst_tmp = self.lst
 

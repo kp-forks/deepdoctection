@@ -27,17 +27,17 @@ LayoutXLM as well as LayoutLMv3 are treated there.
 
 ```python
 
-    path_config_json = dd.ModelCatalog.get_full_path_configs("microsoft/layoutlm-base-uncased/pytorch_model.bin")
-    path_weights = dd.ModelCatalog.get_full_path_weights("microsoft/layoutlm-base-uncased/pytorch_model.bin")
-        
-    dataset_train = dd.get_dataset("funsd")
-    dataset_train.dataflow.categories.filter_categories(categories=dd.LayoutType.word)
+path_config_json = dd.ModelCatalog.get_full_path_configs("microsoft/layoutlm-base-uncased/pytorch_model.bin")
+path_weights = dd.ModelCatalog.get_full_path_weights("microsoft/layoutlm-base-uncased/pytorch_model.bin")
 
-    metric = dd.get_metric("f1")
-    
-    # Token classes are saved for each word as token_tag sub category. Here we let the metric know
-    # where to look at when collecting prediction and ground truth.  
-    metric.set_categories(sub_category_names={"word": ["token_tag"]})
+dataset_train = dd.get_dataset("funsd")
+dataset_train.dataflow.categories.filter_categories(categories=dd.LayoutType.WORD)
+
+metric = dd.get_metric("f1")
+
+# Token classes are saved for each word as token_tag sub category. Here we let the metric know
+# where to look at when collecting prediction and ground truth.  
+metric.set_categories(sub_category_names={"word": ["token_tag"]})
 ```
 
 ```python
@@ -144,7 +144,6 @@ trained model by using a confusion matrix.
     tokenizer_fast = LayoutLMTokenizerFast.from_pretrained("microsoft/layoutlm-base-uncased")
     pipe_component = dd.LMTokenClassifierService(tokenizer_fast,
                                                  layoutlm_classifier,
-                                                 dd.image_to_layoutlm_features,
                                                  use_other_as_default_category=True)
     
     evaluator = dd.Evaluator(dataset_train, pipe_component, metric)
@@ -173,29 +172,35 @@ trained model by using a confusion matrix.
 ```python
 
     def get_layoutlm_pipeline():
-        path_config_json = "/path/to/Tests/Token_classification/checkpoint-300/config.json"
-        path_weights = "/path/to/Tests/Token_classification/checkpoint-300/pytorch_model.bin"
-        text_line_predictor = dd.DoctrTextlineDetector()
+        path_config_json = "/path/to/dir/checkpoint-300/config.json"
+        path_weights = "/path/to/dir/checkpoint-300/pytorch_model.bin"
+
+        path_weights_tl = dd.ModelDownloadManager.maybe_download_weights_and_configs("doctr/db_resnet50/pt/db_resnet50-ac60cadc.pt")
+        categories_tl = dd.ModelCatalog.get_profile("doctr/db_resnet50/pt/db_resnet50-ac60cadc.pt").categories
+        text_line_predictor = dd.DoctrTextlineDetector("db_resnet50", path_weights_tl, categories_tl, "cpu", "PT")
+
         layout_component = dd.ImageLayoutService(text_line_predictor, to_image=True, crop_image=True)
-        text_recognizer = dd.DoctrTextRecognizer()
+        
+        
+        path_weights_tr = dd.ModelDownloadManager.maybe_download_weights_and_configs("doctr/crnn_vgg16_bn/pt/crnn_vgg16_bn-9762b0b0.pt")
+        text_recognizer = dd.DoctrTextRecognizer("crnn_vgg16_bn", path_weights_tr, "cpu", "PT")
         text_component = dd.TextExtractionService(text_recognizer, extract_from_roi="word")
     
         layoutlm_token_classifier = dd.HFLayoutLmTokenClassifier(path_config_json,
                                                               path_weights,
                                                               categories={
-                                                                  "1": "B-answer",
-                                                                  "2": "B-header",
-                                                                  "3": "B-question",
-                                                                  "4": "I-answer",
-                                                                  "5": "I-header",
-                                                                  "6": "I-question",
-                                                                  "7": "O"
+                                                                  1: "B-answer",
+                                                                  2: "B-header",
+                                                                  3: "B-question",
+                                                                  4: "I-answer",
+                                                                  5: "I-header",
+                                                                  6: "I-question",
+                                                                  7: "O"
                                                               })
     
         tokenizer_fast = LayoutLMTokenizerFast.from_pretrained("microsoft/layoutlm-base-uncased")
         layoutlm_component = dd.LMTokenClassifierService(tokenizer_fast,
-                                                         layoutlm_token_classifier,
-                                                         dd.image_to_layoutlm_features)
+                                                         layoutlm_token_classifier)
         
         # adding a text order service to get an arrangment of words from top to bottom and left to right.
         reading_order = dd.TextOrderService(text_container="word")
@@ -229,7 +234,7 @@ trained model by using a confusion matrix.
 
     plt.figure(figsize = (25,17))
     plt.axis('off')
-    plt.imshow(dp.viz())
+    plt.imshow(dp.viz(show_words=True))
 ```
 
 ![](./_imgs/layoutlm_token_classification_1.png)
@@ -244,16 +249,15 @@ trained model by using a confusion matrix.
 
 ![](./_imgs/layoutlm_token_classification_2.png)
 
-
 ```python
 
-    word_list = dp.items[0].words
-    word_list.sort(key=lambda x: x.reading_order) 
-    output = [["#", "LABEL"]]
-    for word in word_list:
-        output.append([word.text, word.token_class + "-" + word.tag])
-    
-    print(tabulate(output, headers="firstrow"))
+word_list = dp.words
+word_list.sort(key=lambda x: x.READING_ORDER)
+output = [["#", "LABEL"]]
+for word in word_list:
+    output.append([word.CHARACTERS, word.TOKEN_CLASS + "-" + word.TAG])
+
+print(tabulate(output, headers="firstrow"))
 ```
 
 ```
@@ -387,16 +391,15 @@ trained model by using a confusion matrix.
 
 [](./_imgs/layoutlm_token_classification_4.png)
 
-
 ```python
 
-    word_list = dp.items[0].words
-    word_list.sort(key=lambda x: x.reading_order) 
-    output = [["#", "LABEL"]]
-    for word in word_list:
-        output.append([word.text, word.token_class + "-" + word.tag])
-    
-    print(tabulate(output, headers="firstrow"))
+word_list = dp.words
+word_list.sort(key=lambda x: x.READING_ORDER)
+output = [["#", "LABEL"]]
+for word in word_list:
+    output.append([word.CHARACTERS, word.TOKEN_CLASS + "-" + word.TAG])
+
+print(tabulate(output, headers="firstrow"))
 ```
 
 ```

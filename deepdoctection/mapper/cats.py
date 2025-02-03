@@ -21,19 +21,19 @@ builder method of a dataset.
 """
 
 from collections import defaultdict
-from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Literal, Mapping, Optional, Sequence, Union
 
-from ..datapoint.annotation import CategoryAnnotation, ContainerAnnotation, ImageAnnotation, SummaryAnnotation
+from ..datapoint.annotation import DEFAULT_CATEGORY_ID, CategoryAnnotation, ContainerAnnotation
 from ..datapoint.image import Image
-from ..utils.settings import ObjectTypes, TypeOrStr, get_type
+from ..utils.settings import ObjectTypes, SummaryType, TypeOrStr, get_type
 from .maputils import LabelSummarizer, curry
 
 
 @curry
 def cat_to_sub_cat(
     dp: Image,
-    categories_dict_names_as_key: Dict[TypeOrStr, str],
-    cat_to_sub_cat_dict: Optional[Dict[TypeOrStr, TypeOrStr]] = None,
+    categories_dict_names_as_key: dict[TypeOrStr, int],
+    cat_to_sub_cat_dict: Optional[dict[TypeOrStr, TypeOrStr]] = None,
 ) -> Image:
     """
     Replace some category with its affiliated sub category of CategoryAnnotations. Suppose your category name is `foo`
@@ -49,13 +49,12 @@ def cat_to_sub_cat(
     if cat_to_sub_cat_dict is None:
         return dp
     cat_to_sub_cat_dict_obj_type = {get_type(key): get_type(value) for key, value in cat_to_sub_cat_dict.items()}
-    categories_dict = categories_dict_names_as_key
-    for ann in dp.get_annotation_iter(category_names=list(cat_to_sub_cat_dict_obj_type.keys())):
+    for ann in dp.get_annotation(category_names=list(cat_to_sub_cat_dict_obj_type.keys())):
         sub_cat_type = cat_to_sub_cat_dict_obj_type[get_type(ann.category_name)]
         sub_cat = ann.get_sub_category(sub_cat_type)
         if sub_cat:
             ann.category_name = sub_cat.category_name
-            ann.category_id = categories_dict[ann.category_name]
+            ann.category_id = categories_dict_names_as_key[ann.category_name]
 
     return dp
 
@@ -63,7 +62,7 @@ def cat_to_sub_cat(
 @curry
 def re_assign_cat_ids(
     dp: Image,
-    categories_dict_name_as_key: Optional[Dict[TypeOrStr, str]] = None,
+    categories_dict_name_as_key: Optional[dict[TypeOrStr, int]] = None,
     cat_to_sub_cat_mapping: Optional[Mapping[ObjectTypes, Any]] = None,
 ) -> Image:
     """
@@ -74,18 +73,31 @@ def re_assign_cat_ids(
     Annotations that are not in the dictionary provided will be removed.
 
     :param dp: Image
-    :param categories_dict_name_as_key: e.g. {"foo": "1", "bak": "2"}
-    :param cat_to_sub_cat_mapping:
+    :param categories_dict_name_as_key: e.g. `{LayoutType.word: 1}`
+    :param cat_to_sub_cat_mapping: e.g. `{<LayoutType.word>:
+        {<WordType.token_class>:
+            {<FundsFirstPage.REPORT_DATE>: 1,
+            <FundsFirstPage.REPORT_TYPE>: 2,
+            <FundsFirstPage.UMBRELLA>: 3,
+            <FundsFirstPage.FUND_NAME>: 4,
+            <TokenClasses.OTHER>: 5},
+            <WordType.TAG>:
+            {<BioTag.INSIDE>: 1,
+            <BioTag.OUTSIDE>: 2,
+            <BioTag.BEGIN>: 3}}}`
+            To re-assign the category ids of an image summary, use the key 'default_type' for the default category, e.g.
+            `{DefaultType.DEFAULT_TYPE: {<PageType.DOCUMENT_TYPE>: {<DocumentType.INVOICE>:1,
+            <DocumentType.BANK_STATEMENT>:2}}}`
     :return: Image
     """
 
-    anns_to_remove: List[ImageAnnotation] = []
-    for ann in dp.get_annotation_iter():
+    ann_ids_to_remove: list[str] = []
+    for ann in dp.get_annotation():
         if categories_dict_name_as_key is not None:
             if ann.category_name in categories_dict_name_as_key:
                 ann.category_id = categories_dict_name_as_key[ann.category_name]
             else:
-                anns_to_remove.append(ann)
+                ann_ids_to_remove.append(ann.annotation_id)
 
         if cat_to_sub_cat_mapping:
             if ann.category_name in cat_to_sub_cat_mapping:
@@ -93,17 +105,24 @@ def re_assign_cat_ids(
                 for key in sub_cat_keys_to_sub_cat_values:
                     sub_cat_values_dict = sub_cat_keys_to_sub_cat_values[key]
                     sub_category = ann.get_sub_category(key)
-                    sub_category.category_id = sub_cat_values_dict.get(sub_category.category_name, "")
+                    sub_category.category_id = sub_cat_values_dict.get(sub_category.category_name, DEFAULT_CATEGORY_ID)
 
-    for ann in anns_to_remove:
-        dp.remove(ann)
+    if cat_to_sub_cat_mapping:
+        if "default_type" in cat_to_sub_cat_mapping:
+            sub_cat_keys_to_sub_cat_values = cat_to_sub_cat_mapping[get_type("default_type")]
+            for key in sub_cat_keys_to_sub_cat_values:
+                sub_cat_values_dict = sub_cat_keys_to_sub_cat_values[key]
+                sub_category = dp.summary.get_sub_category(key)
+                sub_category.category_id = sub_cat_values_dict.get(sub_category.category_name, DEFAULT_CATEGORY_ID)
+
+    dp.remove(annotation_ids=ann_ids_to_remove)
 
     return dp
 
 
 @curry
 def filter_cat(
-    dp: Image, categories_as_list_filtered: List[TypeOrStr], categories_as_list_unfiltered: List[TypeOrStr]
+    dp: Image, categories_as_list_filtered: list[TypeOrStr], categories_as_list_unfiltered: list[TypeOrStr]
 ) -> Image:
     """
     Filters category annotations based on the on a list of categories to be kept and a list of all possible
@@ -122,7 +141,7 @@ def filter_cat(
     remove_cats_mapper = remove_cats(category_names=cats_to_remove_list)  # pylint: disable=E1120  # 259
     dp = remove_cats_mapper(dp)
 
-    categories_dict_name_as_key = {v: str(k) for k, v in enumerate(categories_as_list_filtered, 1)}
+    categories_dict_name_as_key = {v: k for k, v in enumerate(categories_as_list_filtered, 1)}
     re_assign_cat_ids_mapper = re_assign_cat_ids(  # pylint: disable=E1120
         categories_dict_name_as_key=categories_dict_name_as_key
     )
@@ -150,13 +169,13 @@ def filter_summary(
     :return: Image or None
     """
     for key, values in sub_cat_to_sub_cat_names_or_ids.items():
-        if mode == "name" and dp.summary:
+        if mode == "name":
             if dp.summary.get_sub_category(get_type(key)).category_name in values:
                 return dp
-        elif mode == "value" and dp.summary:
+        elif mode == "value":
             if dp.summary.get_sub_category(get_type(key)).value in values:  # type: ignore
                 return dp
-        elif dp.summary:
+        else:
             if dp.summary.get_sub_category(get_type(key)).category_id in values:
                 return dp
     return None
@@ -169,7 +188,7 @@ def image_to_cat_id(
     sub_categories: Optional[Union[Mapping[TypeOrStr, TypeOrStr], Mapping[TypeOrStr, Sequence[TypeOrStr]]]] = None,
     summary_sub_category_names: Optional[Union[TypeOrStr, Sequence[TypeOrStr]]] = None,
     id_name_or_value: Literal["id", "name", "value"] = "id",
-) -> Tuple[Dict[TypeOrStr, Union[List[int], List[int]]], str]:
+) -> tuple[dict[TypeOrStr, list[int]], str]:
     """
     Extracts all category_ids, sub category information or summary sub category information with given names into a
     defaultdict. This mapping is useful when running evaluation with e.g. an accuracy metric.
@@ -189,7 +208,7 @@ def image_to_cat_id(
 
         will return
 
-            ({'foo':['1', '1'], 'bak':[ '2'], 'baz':['3']}, image_id)
+            ({'foo':[1,1], 'bak':[2], 'baz':[3]}, image_id)
 
 
     **Example 2:**
@@ -203,7 +222,7 @@ def image_to_cat_id(
 
         will return
 
-            ({'foo_sub_1':['5', '6']}, image_id)
+            ({'foo_sub_1':[5,6]}, image_id)
 
 
 
@@ -228,7 +247,7 @@ def image_to_cat_id(
     if not summary_sub_category_names:
         summary_sub_category_names = []
 
-    tmp_sub_category_names: Dict[str, Sequence[str]] = {}
+    tmp_sub_category_names: dict[str, Sequence[str]] = {}
 
     if sub_categories is not None:
         for key, val in sub_categories.items():
@@ -240,15 +259,15 @@ def image_to_cat_id(
         raise ValueError(f"id_name_or_value must be in ('id', 'name', 'value') but is {id_name_or_value}")
 
     if category_names or sub_categories:
-        for ann in dp.get_annotation_iter():
+        for ann in dp.get_annotation():
             if ann.category_name in category_names:
-                cat_container[ann.category_name].append(int(ann.category_id))
+                cat_container[ann.category_name].append(ann.category_id)
             if ann.category_name in tmp_sub_category_names:
                 for sub_cat_name in tmp_sub_category_names[ann.category_name]:
                     sub_cat = ann.get_sub_category(get_type(sub_cat_name))
                     if sub_cat is not None:
                         if id_name_or_value == "id":
-                            cat_container[sub_cat_name].append(int(sub_cat.category_id))
+                            cat_container[sub_cat_name].append(sub_cat.category_id)
                         if id_name_or_value == "name":
                             cat_container[sub_cat_name].append(sub_cat.category_name)  # type: ignore
                         if id_name_or_value == "value":
@@ -259,11 +278,11 @@ def image_to_cat_id(
                                 )
                             cat_container[sub_cat_name].append(sub_cat.value)  # type: ignore
 
-    if dp.summary is not None and summary_sub_category_names:
+    if summary_sub_category_names:
         for sub_cat_name in summary_sub_category_names:
             sub_cat = dp.summary.get_sub_category(get_type(sub_cat_name))
             if id_name_or_value == "id":
-                cat_container[sub_cat_name].append(int(sub_cat.category_id))
+                cat_container[sub_cat_name].append(sub_cat.category_id)
             if id_name_or_value == "name":
                 cat_container[sub_cat_name].append(sub_cat.category_name)  # type: ignore
             if id_name_or_value == "value":
@@ -312,11 +331,11 @@ def remove_cats(
     if isinstance(summary_sub_categories, str):
         summary_sub_categories = [summary_sub_categories]
 
-    anns_to_remove = []
+    ann_ids_to_remove = []
 
-    for ann in dp.get_annotation_iter():
+    for ann in dp.get_annotation():
         if ann.category_name in category_names:
-            anns_to_remove.append(ann)
+            ann_ids_to_remove.append(ann.annotation_id)
         if ann.category_name in sub_categories.keys():
             sub_cats_to_remove = sub_categories[ann.category_name]
             if isinstance(sub_cats_to_remove, str):
@@ -330,19 +349,17 @@ def remove_cats(
             for relation in relationships_to_remove:
                 ann.remove_relationship(key=get_type(relation))
 
-    for ann in anns_to_remove:
-        dp.remove(ann)
+    dp.remove(annotation_ids=ann_ids_to_remove)
 
     if summary_sub_categories is not None:
-        if dp.summary is not None:
-            for sub_cat in summary_sub_categories:
-                dp.summary.remove_sub_category(get_type(sub_cat))
+        for sub_cat in summary_sub_categories:
+            dp.summary.remove_sub_category(get_type(sub_cat))
 
     return dp
 
 
 @curry
-def add_summary(dp: Image, categories: Mapping[str, ObjectTypes]) -> Image:
+def add_summary(dp: Image, categories: Mapping[int, ObjectTypes]) -> Image:
     """
     Adding a summary with the number of categories in an image.
 
@@ -356,10 +373,10 @@ def add_summary(dp: Image, categories: Mapping[str, ObjectTypes]) -> Image:
     for ann in anns:
         summarizer.dump(ann.category_id)
     summary_dict = summarizer.get_summary()
-    summary = SummaryAnnotation()
+    summary = CategoryAnnotation(category_name=SummaryType.SUMMARY)
     for cat_id, val in summary_dict.items():
         summary.dump_sub_category(
-            categories[cat_id], CategoryAnnotation(category_name=categories[cat_id], category_id=str(val))
+            categories[cat_id], CategoryAnnotation(category_name=categories[cat_id], category_id=val)
         )
     dp.summary = summary
     return dp

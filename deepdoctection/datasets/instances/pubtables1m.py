@@ -37,9 +37,12 @@ Module for PubTables1M-Detection-PASCAL-VOC dataset. Install the dataset followi
     ├── PubTables-1M-Structure_Annotations_Test
     ├── PubTables-1M-Structure_Images_Test
 """
+from __future__ import annotations
 
 import os
 from typing import Mapping, Union
+
+from lazy_imports import try_import
 
 from ...dataflow import DataFlow, MapData, SerializerFiles
 from ...datasets.info import DatasetInfo
@@ -47,16 +50,16 @@ from ...mapper.cats import filter_cat
 from ...mapper.maputils import curry
 from ...mapper.misc import xml_to_dict
 from ...mapper.pascalstruct import pascal_voc_dict_to_image
-from ...utils.detection_types import JsonDict
 from ...utils.file_utils import lxml_available
 from ...utils.fs import get_package_path
 from ...utils.settings import CellType, DatasetType, LayoutType
+from ...utils.types import JsonDict
 from ..base import _BuiltInDataset
 from ..dataflow_builder import DataFlowBaseBuilder
 from ..info import DatasetCategories
 from ..registry import dataset_registry
 
-if lxml_available():
+with try_import() as import_guard:
     from lxml import etree
 
 _NAME = "pubtables1m_det"
@@ -77,14 +80,14 @@ _LICENSE = "Community Data License Agreement – Permissive, Version 1.0"
 _URL = "https://msropendata.com/datasets/505fcbe3-1383-42b1-913a-f651b8b712d3"
 
 _SPLITS: Mapping[str, str] = {"train": "train", "val": "val", "test": "test"}
-_TYPE = DatasetType.object_detection
+_TYPE = DatasetType.OBJECT_DETECTION
 _LOCATION = "PubTables1M"
 _ANNOTATION_FILES: Mapping[str, str] = {
     "train": "PubTables1M-Detection-PASCAL-VOC/train",
     "val": "PubTables1M-Detection-PASCAL-VOC/val",
     "test": "PubTables1M-Detection-PASCAL-VOC/test",
 }
-_INIT_CATEGORIES_DET = [LayoutType.table, LayoutType.table_rotated]
+_INIT_CATEGORIES_DET = [LayoutType.TABLE, LayoutType.TABLE_ROTATED]
 
 
 @dataset_registry.register("pubtables1m_det")
@@ -102,7 +105,7 @@ class Pubtables1MDet(_BuiltInDataset):
     def _categories(self) -> DatasetCategories:
         return DatasetCategories(init_categories=_INIT_CATEGORIES_DET)
 
-    def _builder(self) -> "Pubtables1MBuilder":
+    def _builder(self) -> Pubtables1MBuilder:
         return Pubtables1MBuilder(location=_LOCATION, annotation_files=_ANNOTATION_FILES)
 
 
@@ -177,7 +180,7 @@ class Pubtables1MBuilder(DataFlowBaseBuilder):
                 load_image,
                 filter_empty_image=True,
                 fake_score=fake_score,
-                category_name_mapping={"table": LayoutType.table, "table rotated": LayoutType.table_rotated},
+                category_name_mapping={"table": LayoutType.TABLE, "table rotated": LayoutType.TABLE_ROTATED},
             ),
         )
 
@@ -192,13 +195,13 @@ _ANNOTATION_FILES_STRUCT: Mapping[str, str] = {
 }
 
 _INIT_CATEGORIES_STRUCT = [
-    LayoutType.table,
-    LayoutType.row,
-    LayoutType.column,
-    CellType.spanning,
-    CellType.row_header,
-    CellType.column_header,
-    CellType.projected_row_header,
+    LayoutType.TABLE,
+    LayoutType.ROW,
+    LayoutType.COLUMN,
+    CellType.SPANNING,
+    CellType.ROW_HEADER,
+    CellType.COLUMN_HEADER,
+    CellType.PROJECTED_ROW_HEADER,
 ]
 
 _IMAGES: Mapping[str, str] = {
@@ -225,7 +228,7 @@ class Pubtables1MStruct(_BuiltInDataset):
     def _categories(self) -> DatasetCategories:
         return DatasetCategories(init_categories=_INIT_CATEGORIES_STRUCT)
 
-    def _builder(self) -> "Pubtables1MBuilderStruct":
+    def _builder(self) -> Pubtables1MBuilderStruct:
         return Pubtables1MBuilderStruct(location=_LOCATION, annotation_files=_ANNOTATION_FILES_STRUCT)
 
 
@@ -299,13 +302,13 @@ class Pubtables1MBuilderStruct(DataFlowBaseBuilder):
                 filter_empty_image=True,
                 fake_score=fake_score,
                 category_name_mapping={
-                    "table": LayoutType.table,
-                    "table spanning cell": CellType.spanning,
-                    "table row": LayoutType.row,
-                    "table row header": CellType.row_header,
-                    "table projected row header": CellType.projected_row_header,
-                    "table column": LayoutType.column,
-                    "table column header": CellType.column_header,
+                    "table": LayoutType.TABLE,
+                    "table spanning cell": CellType.SPANNING,
+                    "table row": LayoutType.ROW,
+                    "table row header": CellType.ROW_HEADER,
+                    "table projected row header": CellType.PROJECTED_ROW_HEADER,
+                    "table column": LayoutType.COLUMN,
+                    "table column header": CellType.COLUMN_HEADER,
                 },
             ),
         )

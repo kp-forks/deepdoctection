@@ -19,27 +19,29 @@
 Module for mapping annotations into standard Detectron2 dataset dict. Also providing some tools for W&B mapping and
 visualising
 """
-
+from __future__ import annotations
 
 import os.path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Mapping, Optional, Sequence, Union
 
 import numpy as np
-import torch
+from lazy_imports import try_import
 
-from ..datapoint.annotation import ImageAnnotation
+from ..datapoint.annotation import DEFAULT_CATEGORY_ID, ImageAnnotation
 from ..datapoint.image import Image
 from ..extern.pt.nms import batched_nms
 from ..mapper.maputils import curry
-from ..utils.detection_types import JsonDict
-from ..utils.file_utils import detectron2_available, wandb_available
-from ..utils.settings import ObjectTypes, TypeOrStr, get_type
+from ..utils.settings import DefaultType, ObjectTypes, TypeOrStr, get_type
+from ..utils.types import Detectron2Dict
 
-if detectron2_available():
+with try_import() as pt_import_guard:
+    import torch
+
+with try_import() as d2_import_guard:
     from detectron2.structures import BoxMode
 
-if wandb_available():
-    from wandb import Classes
+with try_import() as wb_import_guard:
+    from wandb import Classes  # type: ignore
     from wandb import Image as Wbimage
 
 
@@ -47,8 +49,8 @@ if wandb_available():
 def image_to_d2_frcnn_training(
     dp: Image,
     add_mask: bool = False,
-    category_names: Optional[Union[str, ObjectTypes, Sequence[Union[str, ObjectTypes]]]] = None,
-) -> Optional[JsonDict]:
+    category_names: Optional[Union[TypeOrStr, Sequence[TypeOrStr]]] = None,
+) -> Optional[Detectron2Dict]:
     """
     Maps an image to a standard dataset dict as described in
     <https://detectron2.readthedocs.io/en/latest/tutorials/datasets.html>. It further checks if the image is physically
@@ -64,7 +66,7 @@ def image_to_d2_frcnn_training(
     if not os.path.isfile(dp.location) and dp.image is None:
         return None
 
-    output: JsonDict = {"file_name": str(dp.location)}
+    output: Detectron2Dict = {"file_name": str(dp.location)}
 
     if dp.image is not None:
         output["image"] = dp.image.astype("float32")
@@ -85,15 +87,15 @@ def image_to_d2_frcnn_training(
             box = box.transform(dp.width, dp.height, absolute_coords=True)
 
         # Detectron2 does not fully support BoxMode.XYXY_REL
-        mapped_ann: Dict[str, Union[str, int, List[float]]] = {
+        mapped_ann: dict[str, Union[str, int, list[float]]] = {
             "bbox_mode": BoxMode.XYXY_ABS,
             "bbox": box.to_list(mode="xyxy"),
-            "category_id": int(ann.category_id) - 1,
+            "category_id": ann.category_id - 1,
         }
         annotations.append(mapped_ann)
 
         if add_mask:
-            raise NotImplementedError
+            raise NotImplementedError("Segmentation in deepdoctection is not supported")
 
     output["annotations"] = annotations
 
@@ -147,23 +149,23 @@ def pt_nms_image_annotations(
 
 def _get_category_attributes(
     ann: ImageAnnotation, cat_to_sub_cat: Optional[Mapping[ObjectTypes, ObjectTypes]] = None
-) -> Tuple[str, str, Optional[float]]:
+) -> tuple[ObjectTypes, int, Optional[float]]:
     if cat_to_sub_cat:
         sub_cat_key = cat_to_sub_cat.get(get_type(ann.category_name))
         if sub_cat_key in ann.sub_categories:
             sub_cat = ann.get_sub_category(sub_cat_key)
-            return sub_cat.category_name, sub_cat.category_id, sub_cat.score
-        return "", "", 0.0
-    return ann.category_name, ann.category_id, ann.score
+            return get_type(sub_cat.category_name), sub_cat.category_id, sub_cat.score
+        return DefaultType.DEFAULT_TYPE, DEFAULT_CATEGORY_ID, 0.0
+    return get_type(ann.category_name), ann.category_id, ann.score
 
 
 @curry
 def to_wandb_image(
     dp: Image,
-    categories: Mapping[str, TypeOrStr],
-    sub_categories: Optional[Mapping[str, TypeOrStr]] = None,
+    categories: Mapping[int, TypeOrStr],
+    sub_categories: Optional[Mapping[int, TypeOrStr]] = None,
     cat_to_sub_cat: Optional[Mapping[ObjectTypes, ObjectTypes]] = None,
-) -> Tuple[str, "Wbimage"]:
+) -> tuple[str, Wbimage]:
     """
     Converting a deepdoctection image into a wandb image
 
@@ -183,11 +185,11 @@ def to_wandb_image(
     anns = dp.get_annotation(category_names=list(categories.values()))
 
     if sub_categories:
-        class_labels = {int(key): val for key, val in sub_categories.items()}
-        class_set = Classes([{"name": val, "id": int(key)} for key, val in sub_categories.items()])
+        class_labels = dict(sub_categories.items())
+        class_set = Classes([{"name": val, "id": key} for key, val in sub_categories.items()])
     else:
-        class_labels = {int(key): val for key, val in categories.items()}
-        class_set = Classes([{"name": val, "id": int(key)} for key, val in categories.items()])
+        class_set = Classes([{"name": val, "id": key} for key, val in categories.items()])
+        class_labels = dict(categories.items())
 
     for ann in anns:
         bounding_box = ann.get_bounding_box(dp.image_id)
@@ -198,7 +200,7 @@ def to_wandb_image(
             box = {
                 "position": {"middle": bounding_box.center, "width": bounding_box.width, "height": bounding_box.height},
                 "domain": "pixel",
-                "class_id": int(category_id),
+                "class_id": category_id,
                 "box_caption": category_name,
             }
             if score:

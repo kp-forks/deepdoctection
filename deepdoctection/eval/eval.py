@@ -19,36 +19,35 @@
 """
 Module for `Evaluator`
 """
-
-__all__ = ["Evaluator"]
+from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Dict, List, Literal, Mapping, Optional, Type, Union, overload
+from typing import Any, Generator, Literal, Mapping, Optional, Type, Union, overload
 
 import numpy as np
+from lazy_imports import try_import
 
 from ..dataflow import CacheData, DataFlow, DataFromList, MapData
 from ..datapoint.image import Image
 from ..datasets.base import DatasetBase
 from ..mapper.cats import filter_cat, remove_cats
+from ..mapper.d2struct import to_wandb_image
 from ..mapper.misc import maybe_load_image, maybe_remove_image, maybe_remove_image_from_category
-from ..pipe.base import LanguageModelPipelineComponent, PredictorPipelineComponent
+from ..pipe.base import PipelineComponent
 from ..pipe.common import PageParsingService
 from ..pipe.concurrency import MultiThreadPipelineComponent
 from ..pipe.doctectionpipe import DoctectionPipe
-from ..utils.detection_types import ImageType
-from ..utils.file_utils import detectron2_available, wandb_available
-from ..utils.logger import logger
+from ..utils.logger import LoggingRecord, logger
 from ..utils.settings import DatasetType, LayoutType, TypeOrStr, get_type
+from ..utils.types import PixelValues
 from ..utils.viz import interactive_imshow
 from .base import MetricBase
 
-if wandb_available():
+with try_import() as wb_import_guard:
     import wandb  # pylint:disable=W0611
     from wandb import Artifact, Table
 
-if wandb_available() and detectron2_available():
-    from ..mapper.d2struct import to_wandb_image
+__all__ = ["Evaluator"]
 
 
 class Evaluator:
@@ -91,10 +90,10 @@ class Evaluator:
     def __init__(
         self,
         dataset: DatasetBase,
-        component_or_pipeline: Union[PredictorPipelineComponent, LanguageModelPipelineComponent, DoctectionPipe],
+        component_or_pipeline: Union[PipelineComponent, DoctectionPipe],
         metric: Union[Type[MetricBase], MetricBase],
         num_threads: int = 2,
-        run: Optional["wandb.sdk.wandb_run.Run"] = None,
+        run: Optional[wandb.sdk.wandb_run.Run] = None,
     ) -> None:
         """
         Evaluating a pipeline component on a dataset with a given metric.
@@ -109,12 +108,14 @@ class Evaluator:
         self.pipe: Optional[DoctectionPipe] = None
 
         # when passing a component, we will process prediction on num_threads
-        if isinstance(component_or_pipeline, (PredictorPipelineComponent, LanguageModelPipelineComponent)):
+        if isinstance(component_or_pipeline, PipelineComponent):
             logger.info(
-                "Building multi threading pipeline component to increase prediction throughput. Using %i threads",
-                num_threads,
+                LoggingRecord(
+                    f"Building multi threading pipeline component to increase prediction throughput. "
+                    f"Using {num_threads} threads"
+                )
             )
-            pipeline_components: List[Union[PredictorPipelineComponent, LanguageModelPipelineComponent]] = []
+            pipeline_components: list[PipelineComponent] = []
 
             for _ in range(num_threads - 1):
                 copy_pipe_component = component_or_pipeline.clone()
@@ -138,14 +139,14 @@ class Evaluator:
 
         self.wandb_table_agent: Optional[WandbTableAgent]
         if run is not None:
-            if self.dataset.dataset_info.type == DatasetType.object_detection:
+            if self.dataset.dataset_info.type == DatasetType.OBJECT_DETECTION:
                 self.wandb_table_agent = WandbTableAgent(
                     run,
                     self.dataset.dataset_info.name,
                     50,
                     self.dataset.dataflow.categories.get_categories(filtered=True),
                 )
-            elif self.dataset.dataset_info.type == DatasetType.token_classification:
+            elif self.dataset.dataset_info.type == DatasetType.TOKEN_CLASSIFICATION:
                 if hasattr(self.metric, "sub_cats"):
                     sub_cat_key, sub_cat_val_list = list(self.metric.sub_cats.items())[0]
                     sub_cat_val = sub_cat_val_list[0]
@@ -169,7 +170,7 @@ class Evaluator:
                         "metric has no attribute sub_cats and cannot be used for token classification datasets"
                     )
             else:
-                raise NotImplementedError
+                raise NotImplementedError()
 
         else:
             self.wandb_table_agent = None
@@ -177,16 +178,16 @@ class Evaluator:
     @overload
     def run(
         self, output_as_dict: Literal[False] = False, **dataflow_build_kwargs: Union[str, int]
-    ) -> List[Dict[str, float]]:
+    ) -> list[dict[str, float]]:
         ...
 
     @overload
-    def run(self, output_as_dict: Literal[True], **dataflow_build_kwargs: Union[str, int]) -> Dict[str, float]:
+    def run(self, output_as_dict: Literal[True], **dataflow_build_kwargs: Union[str, int]) -> dict[str, float]:
         ...
 
     def run(
         self, output_as_dict: bool = False, **dataflow_build_kwargs: Union[str, int]
-    ) -> Union[List[Dict[str, float]], Dict[str, float]]:
+    ) -> Union[list[dict[str, float]], dict[str, float]]:
         """
         Start evaluation process and return the results.
 
@@ -204,7 +205,7 @@ class Evaluator:
         df_pr = self._clean_up_predict_dataflow_annotations(df_pr)
         df_pr = self._run_pipe_or_component(df_pr)
 
-        logger.info("Starting evaluation...")
+        logger.info(LoggingRecord("Starting evaluation..."))
         result = self.metric.get_distance(df_gt, df_pr, self.dataset.dataflow.categories)
         self.metric.print_result()
 
@@ -222,7 +223,7 @@ class Evaluator:
     def _run_pipe_or_component(self, df_pr: DataFlow) -> DataFlow:
         if self.pipe_component:
             self.pipe_component.put_task(df_pr)
-            logger.info("Predicting objects...")
+            logger.info(LoggingRecord("Predicting objects..."))
             df_pr_list = self.pipe_component.start()
             if self.wandb_table_agent is not None:
                 df_pr_list = [self.wandb_table_agent.dump(dp) for dp in df_pr_list]
@@ -245,11 +246,11 @@ class Evaluator:
         possible_cats_in_datapoint = self.dataset.dataflow.categories.get_categories(as_dict=False, filtered=True)
 
         # clean-up procedure depends on the dataset type
-        if self.dataset.dataset_info.type == DatasetType.object_detection:
+        if self.dataset.dataset_info.type == DatasetType.OBJECT_DETECTION:
             # we keep all image annotations that will not be generated through processing
-            anns_to_keep = {ann for ann in possible_cats_in_datapoint if ann not in meta_anns["image_annotations"]}
-            sub_cats_to_remove = meta_anns["sub_categories"]
-            relationships_to_remove = meta_anns["relationships"]
+            anns_to_keep = {ann for ann in possible_cats_in_datapoint if ann not in meta_anns.image_annotations}
+            sub_cats_to_remove = meta_anns.sub_categories
+            relationships_to_remove = meta_anns.relationships
             # removing annotations takes place in three steps: First we remove all image annotations. Then, with all
             # remaining image annotations we check, if the image attribute (with Image instance !) is not empty and
             # remove it as well, if necessary. In the last step we remove all sub categories and relationships, if
@@ -261,19 +262,19 @@ class Evaluator:
                 remove_cats(sub_categories=sub_cats_to_remove, relationships=relationships_to_remove),
             )
 
-        elif self.dataset.dataset_info.type == DatasetType.sequence_classification:
-            summary_sub_cats_to_remove = meta_anns["summaries"]
+        elif self.dataset.dataset_info.type == DatasetType.SEQUENCE_CLASSIFICATION:
+            summary_sub_cats_to_remove = meta_anns.summaries
             df_pr = MapData(df_pr, remove_cats(summary_sub_categories=summary_sub_cats_to_remove))
 
-        elif self.dataset.dataset_info.type == DatasetType.token_classification:
-            sub_cats_to_remove = meta_anns["sub_categories"]
+        elif self.dataset.dataset_info.type == DatasetType.TOKEN_CLASSIFICATION:
+            sub_cats_to_remove = meta_anns.sub_categories
             df_pr = MapData(df_pr, remove_cats(sub_categories=sub_cats_to_remove))
         else:
-            raise NotImplementedError
+            raise NotImplementedError()
 
         return df_pr
 
-    def compare(self, interactive: bool = False, **kwargs: Union[str, int]) -> Optional[ImageType]:
+    def compare(self, interactive: bool = False, **kwargs: Union[str, int]) -> Generator[PixelValues, None, None]:
         """
         Visualize ground truth and prediction datapoint. Given a dataflow config it will run predictions per sample
         and concat the prediction image (with predicted bounding boxes) with ground truth image.
@@ -290,6 +291,10 @@ class Evaluator:
         show_layouts = kwargs.pop("show_layouts", True)
         show_table_structure = kwargs.pop("show_table_structure", True)
         show_words = kwargs.pop("show_words", False)
+        show_token_class = kwargs.pop("show_token_class", True)
+        ignore_default_token_class = kwargs.pop("ignore_default_token_class", False)
+        floating_text_block_categories = kwargs.pop("floating_text_block_categories", None)
+        include_residual_text_containers = kwargs.pop("include_residual_Text_containers", True)
 
         df_gt = self.dataset.dataflow.build(**kwargs)
         df_pr = self.dataset.dataflow.build(**kwargs)
@@ -298,7 +303,11 @@ class Evaluator:
         df_pr = MapData(df_pr, deepcopy)
         df_pr = self._clean_up_predict_dataflow_annotations(df_pr)
 
-        page_parsing_component = PageParsingService(text_container=LayoutType.word)
+        page_parsing_component = PageParsingService(
+            text_container=LayoutType.WORD,
+            floating_text_block_categories=floating_text_block_categories,  # type: ignore
+            include_residual_text_container=bool(include_residual_text_containers),
+        )
         df_gt = page_parsing_component.predict_dataflow(df_gt)
 
         if self.pipe_component:
@@ -319,18 +328,21 @@ class Evaluator:
                 show_layouts=show_layouts,
                 show_table_structure=show_table_structure,
                 show_words=show_words,
+                show_token_class=show_token_class,
+                ignore_default_token_class=ignore_default_token_class,
             ), dp_pred.viz(
                 show_tables=show_tables,
                 show_layouts=show_layouts,
                 show_table_structure=show_table_structure,
                 show_words=show_words,
+                show_token_class=show_token_class,
+                ignore_default_token_class=ignore_default_token_class,
             )
             img_concat = np.concatenate((img_gt, img_pred), axis=1)
             if interactive:
                 interactive_imshow(img_concat)
             else:
-                return img_concat
-        return None
+                yield img_concat
 
 
 class WandbTableAgent:
@@ -348,11 +360,11 @@ class WandbTableAgent:
 
     def __init__(
         self,
-        wandb_run: "wandb.sdk.wandb_run.Run",
+        wandb_run: wandb.sdk.wandb_run.Run,
         dataset_name: str,
         num_samples: int,
-        categories: Mapping[str, TypeOrStr],
-        sub_categories: Optional[Mapping[str, TypeOrStr]] = None,
+        categories: Mapping[int, TypeOrStr],
+        sub_categories: Optional[Mapping[int, TypeOrStr]] = None,
         cat_to_sub_cat: Optional[Mapping[TypeOrStr, TypeOrStr]] = None,
     ):
         """
@@ -379,8 +391,8 @@ class WandbTableAgent:
         self._counter = 0
 
         # Table logging utils
-        self._table_cols: List[str] = ["file_name", "image"]
-        self._table_rows: List[Any] = []
+        self._table_cols: list[str] = ["file_name", "image"]
+        self._table_rows: list[Any] = []
         self._table_ref = None
 
     def dump(self, dp: Image) -> Image:
@@ -407,7 +419,7 @@ class WandbTableAgent:
         self._table_rows = []
         self._counter = 0
 
-    def _build_table(self) -> "Table":
+    def _build_table(self) -> Table:
         """
         Builds wandb.Table object for logging evaluation
 
@@ -433,4 +445,4 @@ class WandbTableAgent:
         eval_art.add(self._build_table(), self.dataset_name)
         self._run.use_artifact(eval_art)
         eval_art.wait()
-        self._table_ref = eval_art.get(self.dataset_name).data  # type:ignore
+        self._table_ref = eval_art.get(self.dataset_name).data  # type: ignore
