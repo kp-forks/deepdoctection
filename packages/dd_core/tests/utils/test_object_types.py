@@ -329,6 +329,19 @@ def test_register_custom_token_tag_is_idempotent_for_same_custom_enum_and_suffix
     }
 
 
+def test_get_type_with_dynamic_object_types_enabled_returns_dynamic_member(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ENABLE_DYNAMIC_OBJECT_TYPES=True, get_type returns a DYNAMIC_OBJECT_TYPES member for unknown labels."""
+    unregistered = _unique_name("unregistered_label")
+
+    monkeypatch.setenv("ENABLE_DYNAMIC_OBJECT_TYPES", "True")
+
+    member = get_type(unregistered)
+
+    assert isinstance(member, ObjectTypes)
+    assert member.__class__.__name__ == "DYNAMIC_OBJECT_TYPES"
+    assert member.value == unregistered.lower()
+
+
 def test_register_custom_token_tag_extends_existing_registered_tag_type() -> None:
     """A later registration for same name extends the existing enum."""
     custom_enum_name = _unique_name("CustomTokenType")
