@@ -309,6 +309,7 @@ class EnvSettings(BaseSettings):
 
     # Custom object types autoload (comma‑separated string or JSON list in env is accepted)
     CUSTOM_OBJECT_TYPES_MODULES: list[str] = Field(default_factory=list)
+    ENABLE_DYNAMIC_OBJECT_TYPES: bool = False
 
     # DL framework toggles
     DD_USE_TORCH: bool = False
@@ -484,6 +485,7 @@ class EnvSettings(BaseSettings):
             # hf / catalog
             "HF_CREDENTIALS": self.HF_CREDENTIALS,
             "MODEL_CATALOG": self.MODEL_CATALOG,
+            "ENABLE_DYNAMIC_OBJECT_TYPES": self.ENABLE_DYNAMIC_OBJECT_TYPES,
             # dl flags
             "DD_USE_TORCH": self.DD_USE_TORCH,
             "USE_TORCH": self.USE_TORCH,

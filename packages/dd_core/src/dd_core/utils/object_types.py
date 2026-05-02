@@ -21,6 +21,7 @@ Module for funcs and constants that maintain general settings
 from __future__ import annotations
 
 import itertools
+import os
 import re
 import threading
 from enum import Enum
@@ -332,12 +333,10 @@ def update_all_types_dict() -> None:
 
 def get_type(obj_type: Union[str, ObjectTypes]) -> ObjectTypes:
     """
-    Get an object type property from a given string. Does nothing if an `ObjectType` is passed
+    Get an object type property from a given string. Does nothing if an `ObjectType` is passed.
 
-    Args:
-        obj_type: String or ObjectTypes
-    Returns:
-        `ObjectType`
+    If ENABLE_DYNAMIC_OBJECT_TYPES is enabled, unknown string values are dynamically
+    registered under DYNAMIC_OBJECT_TYPES_ENUM_NAME.
     """
     if isinstance(obj_type, ObjectTypes):
         return obj_type
@@ -349,11 +348,32 @@ def get_type(obj_type: Union[str, ObjectTypes]) -> ObjectTypes:
 
     with _TYPES_INDEX_LOCK:
         member = _ALL_TYPES_DICT.get(normalized)
+        if member is not None:
+            return member
 
-    if member is None:
-        raise KeyError(f"String {normalized} does not correspond to a registered ObjectType")
+        if os.environ["ENABLE_DYNAMIC_OBJECT_TYPES"] == "False":
+            raise KeyError(f"String {normalized} does not correspond to a registered ObjectType")
 
-    return member
+        used_names: set[str] = set()
+        existing_enum = object_types_registry.get_all().get("DYNAMIC_OBJECT_TYPES_ENUM_NAME")
+        if existing_enum is not None:
+            used_names = {existing_member.name for existing_member in existing_enum}
+
+        member_name = _sanitize_enum_member_name(normalized, used_names)
+
+        dynamic_enum = _upsert_dynamic_enum(
+            "DYNAMIC_OBJECT_TYPES",
+            [(member_name, normalized)],
+        )
+
+        if dynamic_enum is None:
+            raise KeyError(f"String {normalized} could not be registered as dynamic ObjectType")
+
+        member = _ALL_TYPES_DICT.get(normalized)
+        if member is None:
+            raise KeyError(f"String {normalized} was dynamically registered but is still not resolvable")
+
+        return member
 
 
 def _get_new_obj_type_str(obj_type: str) -> str:
