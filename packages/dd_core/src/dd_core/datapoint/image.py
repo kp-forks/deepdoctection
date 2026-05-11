@@ -1041,6 +1041,9 @@ class Image(BaseModel):
         self, annotation_id: str, location_dict: AnnotationMap
     ) -> Union[ImageAnnotation, CategoryAnnotation, None]:
         image_annotation_id = location_dict.image_annotation_id
+        summary_key = location_dict.summary_key
+        if not image_annotation_id and summary_key is not None:
+            return self.summary.pop_sub_category(summary_key)
         annotations = self.get_annotation(annotation_ids=image_annotation_id)
         if not annotations:
             return None
