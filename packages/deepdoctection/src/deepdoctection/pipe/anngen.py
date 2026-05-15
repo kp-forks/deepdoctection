@@ -50,6 +50,9 @@ class DataPointCacheStore(ABC):
     datapoints.
     """
 
+    def __init__(self, max_pages: int) -> None:
+        self.max_pages = max_pages
+
     @abstractmethod
     def put_datapoint(self, document_id: str, page_number: int, image: Image, job_id: str | None = None) -> None:
         """
@@ -127,8 +130,9 @@ class LocalDataPointCacheStore(DataPointCacheStore):
         Args:
             max_pages (int): Maximum number of pages to keep per document.
         """
-        self.max_pages = max_pages
+
         self._pages: dict[str, dict[int, dict[str, Any]]] = {}
+        super().__init__(max_pages)
 
     def _get_cache_key(self, document_id: str, job_id: str | None) -> str:
         """
@@ -211,6 +215,17 @@ class DatapointManager:
         - `image.clear_image()`
         - `image.remove_image_from_lower_hierarchy(pixel_values_only=True)`
 
+    Async concurrency:
+        When `enable_async_handle=True`, the manager maintains a per-job-id registry of active datapoints
+        (`_datapoint_handle`, `_cache_anns_handle`). This makes it safe to use a single component instance
+        across concurrent async calls, each identified by a unique `job_id`. The assumption is that a given
+        `job_id` maps to exactly one document and its pages are processed sequentially within a job.
+
+        Use `set_datapoint(dp, job_id)` / `get_datapoint(job_id)` / `release_datapoint(job_id)` for the
+        async path. Pass `job_id` to all annotation methods that accept it to route to the correct slot.
+
+        When `enable_async_handle=False` (default), all behavior is identical to the original implementation.
+
     The manager is part of each `PipelineComponent`.
     """
 
@@ -220,20 +235,82 @@ class DatapointManager:
         model_id: Optional[str] = None,
         num_cached_datapoints: int = 0,
         remove_pixel_values_from_cache: bool = True,
-        cache_store: LocalDataPointCacheStore | None = None,
+        cache_store: DataPointCacheStore | None = None,
+        enable_async_handle: bool = False,
     ) -> None:
         self._datapoint: Optional[Image] = None
         self._cache_anns: dict[str, ImageAnnotation] = {}
         self.datapoint_is_passed: bool = False
         self.service_id = service_id
         self.model_id = model_id
+        self.enable_async_handle = enable_async_handle
 
         if num_cached_datapoints < 0:
             raise ValueError("num_cached_datapoints must be >= 0")
         self.remove_pixel_values_from_cache = remove_pixel_values_from_cache
 
-        self._cache_store = cache_store or LocalDataPointCacheStore(max_pages=num_cached_datapoints)
+        self._cache_store: DataPointCacheStore = cache_store or LocalDataPointCacheStore(
+            max_pages=num_cached_datapoints
+        )
         self.num_cached_datapoints = self._cache_store.max_pages
+
+        self._datapoint_handle: dict[str, Image] = {}
+        self._cache_anns_handle: dict[str, dict[str, ImageAnnotation]] = {}
+
+    def set_datapoint(self, dp: Image, job_id: str) -> None:
+        """
+        Register a datapoint for the given job_id in the async-safe slot.
+
+        Only used when `enable_async_handle=True`. Must be called before any annotation
+        methods are invoked with this job_id.
+
+        Args:
+            dp: The image datapoint to register.
+            job_id: Unique identifier for the current processing job.
+        """
+        self._datapoint_handle[job_id] = dp
+        self._cache_anns_handle[job_id] = {ann.annotation_id: ann for ann in dp.get_annotation()}
+
+    def get_datapoint(self, job_id: str) -> Image:
+        """
+        Retrieve the datapoint registered for the given job_id.
+
+        Args:
+            job_id: Unique identifier for the current processing job.
+
+        Returns:
+            The registered image datapoint.
+
+        Raises:
+            ValueError: If no datapoint has been registered for this job_id.
+        """
+        try:
+            return self._datapoint_handle[job_id]
+        except KeyError as exc:
+            raise ValueError(f"No datapoint passed for job_id={job_id}") from exc
+
+    def release_datapoint(self, job_id: str) -> None:
+        """
+        Remove the datapoint slot for the given job_id.
+
+        Should be called once the datapoint leaves the component (after `maybe_cache_datapoint`)
+        to free memory and avoid stale state.
+
+        Args:
+            job_id: Unique identifier for the current processing job.
+        """
+        self._datapoint_handle.pop(job_id, None)
+        self._cache_anns_handle.pop(job_id, None)
+
+    def _resolve_datapoint(self, job_id: str | None) -> Image:
+        if self.enable_async_handle and job_id is not None:
+            return self.get_datapoint(job_id)
+        return self.datapoint
+
+    def _resolve_cache_anns(self, job_id: str | None) -> dict[str, ImageAnnotation]:
+        if self.enable_async_handle and job_id is not None:
+            return self._cache_anns_handle[job_id]
+        return self._cache_anns
 
     def maybe_cache_datapoint(self, image: Optional[Image], job_id: str | None = None) -> None:
         """
@@ -250,10 +327,8 @@ class DatapointManager:
             return
         if self.num_cached_datapoints <= 0:
             return
-
         if self.remove_pixel_values_from_cache:
             image.clear_image()
-
         self._cache_store.put_datapoint(
             document_id=image.document_id,
             page_number=image.page_number,
@@ -292,14 +367,23 @@ class DatapointManager:
         """Re-sets the model_id."""
         self.model_id = model_id
 
-    def assert_datapoint_passed(self) -> None:
+    def assert_datapoint_passed(self, job_id: str | None = None) -> None:
         """
         Asserts that a datapoint is passed.
+
+        When `enable_async_handle=True` and `job_id` is provided, checks the per-job slot.
+        Otherwise falls back to the legacy flag check.
+
+        Args:
+            job_id: Optional job identifier used for async routing.
 
         Raises:
             AssertionError: If a datapoint has not been passed to `DatapointManager` before creating annotations.
         """
-        assert self.datapoint_is_passed, "Pass datapoint to  DatapointManager before creating anns"
+        if self.enable_async_handle and job_id is not None:
+            assert job_id in self._datapoint_handle, "Pass datapoint to DatapointManager before creating anns"
+        else:
+            assert self.datapoint_is_passed, "Pass datapoint to  DatapointManager before creating anns"
 
     def set_image_annotation(
         self,
@@ -309,6 +393,7 @@ class DatapointManager:
         crop_image: bool = False,
         detect_result_max_width: Optional[float] = None,
         detect_result_max_height: Optional[float] = None,
+        job_id: str | None = None,
     ) -> Optional[str]:
         """
         Creates an image annotation from a raw `DetectionResult` dataclass.
@@ -332,6 +417,7 @@ class DatapointManager:
                                      pass the max width possible so coordinates can be rescaled.
             detect_result_max_height: If the detect result has a different scaling scheme from the image it refers to,
                                       pass the max height possible so coordinates can be rescaled.
+            job_id: Optional job identifier for async routing.
 
         Returns:
             The `annotation_id` of the generated image annotation, or `None` if there was a context error.
@@ -340,13 +426,15 @@ class DatapointManager:
             TypeError: If `detect_result.box` is not of type list or `np.ndarray`.
             ValueError: If the parent annotation's image is None or if the annotation's image is None.
         """
-        self.assert_datapoint_passed()
+        self.assert_datapoint_passed(job_id)
         if not isinstance(detect_result.box, (list, np.ndarray)):
             raise TypeError(
                 f"detect_result.box must be of type list or np.ndarray, but is of type {(type(detect_result.box))}"
             )
+        dp = self._resolve_datapoint(job_id)
+        cache_anns = self._resolve_cache_anns(job_id)
         with MappingContextManager(
-            dp_name=self.datapoint.file_name, filter_level="annotation", detect_result=asdict(detect_result)
+            dp_name=dp.file_name, filter_level="annotation", detect_result=asdict(detect_result)
         ) as annotation_context:
             box = BoundingBox(
                 ulx=detect_result.box[0],
@@ -360,8 +448,8 @@ class DatapointManager:
                     box,
                     detect_result_max_width,
                     detect_result_max_height,
-                    self.datapoint.width,
-                    self.datapoint.height,
+                    dp.width,
+                    dp.height,
                 )
             ann = ImageAnnotation(
                 category_name=detect_result.class_name,
@@ -372,7 +460,7 @@ class DatapointManager:
                 model_id=self.model_id,
             )
             if to_annotation_id is not None:
-                parent_ann = self._cache_anns[to_annotation_id]
+                parent_ann = cache_anns[to_annotation_id]
                 if parent_ann.image is None:
                     raise ValueError("image cannot be None")
                 parent_ann.image.dump(ann)
@@ -381,8 +469,8 @@ class DatapointManager:
                     ann.bounding_box.transform(  # type:ignore # pylint: disable=E1101
                         image_width=parent_ann.image.width, image_height=parent_ann.image.height, absolute_coords=True
                     ),
-                    parent_ann.get_bounding_box(self.datapoint.image_id).transform(
-                        image_width=self.datapoint.width, image_height=self.datapoint.height, absolute_coords=True
+                    parent_ann.get_bounding_box(dp.image_id).transform(
+                        image_width=dp.width, image_height=dp.height, absolute_coords=True
                     ),
                 )
                 if ann.image is None:
@@ -394,16 +482,16 @@ class DatapointManager:
                     ),
                 )
                 ann.image.set_embedding(  # pylint: disable=E1101
-                    self.datapoint.image_id,
-                    ann_global_box.transform(image_width=self.datapoint.width, image_height=self.datapoint.height),
+                    dp.image_id,
+                    ann_global_box.transform(image_width=dp.width, image_height=dp.height),
                 )
                 parent_ann.dump_relationship(RelationshipKey.CHILD, ann.annotation_id)
 
-            self.datapoint.dump(ann)
-            self._cache_anns[ann.annotation_id] = ann
+            dp.dump(ann)
+            cache_anns[ann.annotation_id] = ann
 
             if to_image and to_annotation_id is None:
-                self.datapoint.image_ann_to_image(annotation_id=ann.annotation_id, crop_image=crop_image)
+                dp.image_ann_to_image(annotation_id=ann.annotation_id, crop_image=crop_image)
 
         if annotation_context.context_error:
             return None
@@ -416,6 +504,7 @@ class DatapointManager:
         sub_cat_key: ObjectTypes,
         annotation_id: str,
         score: Optional[float] = None,
+        job_id: str | None = None,
     ) -> Optional[str]:
         """
         Creates a category annotation and dumps it as a subcategory to an already created annotation.
@@ -426,13 +515,16 @@ class DatapointManager:
             sub_cat_key: The key to dump the created annotation to.
             annotation_id: The id of the parent annotation. Currently, this can only be an image annotation.
             score: The score to add.
+            job_id: Optional job identifier for async routing.
 
         Returns:
             The `annotation_id` of the generated category annotation, or `None` if there was a context error.
         """
-        self.assert_datapoint_passed()
+        self.assert_datapoint_passed(job_id)
+        dp = self._resolve_datapoint(job_id)
+        cache_anns = self._resolve_cache_anns(job_id)
         with MappingContextManager(
-            dp_name=self.datapoint.file_name,
+            dp_name=dp.file_name,
             filter_level="annotation",
             category_annotation={
                 "category_name": category_name.value,
@@ -447,7 +539,7 @@ class DatapointManager:
                 service_id=self.service_id,
                 model_id=self.model_id,
             )
-            self._cache_anns[annotation_id].dump_sub_category(sub_cat_key, cat_ann)
+            cache_anns[annotation_id].dump_sub_category(sub_cat_key, cat_ann)
         if annotation_context.context_error:
             return None
         return cat_ann.annotation_id
@@ -460,6 +552,7 @@ class DatapointManager:
         annotation_id: str,
         value: Union[str, list[str], ReferencePayload],
         score: Optional[float] = None,
+        job_id: str | None = None,
     ) -> Optional[str]:
         """
         Creates a container annotation and dumps it as a subcategory to an already created annotation.
@@ -471,13 +564,16 @@ class DatapointManager:
             annotation_id: The id of the parent annotation. Currently, this can only be an image annotation.
             value: The value to store.
             score: The score to add.
+            job_id: Optional job identifier for async routing.
 
         Returns:
             The `annotation_id` of the generated container annotation, or None if there was a context error.
         """
-        self.assert_datapoint_passed()
+        self.assert_datapoint_passed(job_id)
+        dp = self._resolve_datapoint(job_id)
+        cache_anns = self._resolve_cache_anns(job_id)
         with MappingContextManager(
-            dp_name=self.datapoint.file_name,
+            dp_name=dp.file_name,
             filter_level="annotation",
             container_annotation={
                 "category_name": category_name.value,
@@ -494,13 +590,17 @@ class DatapointManager:
                 service_id=self.service_id,
                 model_id=self.model_id,
             )
-            self._cache_anns[annotation_id].dump_sub_category(sub_cat_key, cont_ann)
+            cache_anns[annotation_id].dump_sub_category(sub_cat_key, cont_ann)
         if annotation_context.context_error:
             return None
         return cont_ann.annotation_id
 
     def set_relationship_annotation(
-        self, relationship_name: ObjectTypes, target_annotation_id: str, annotation_id: str
+        self,
+        relationship_name: ObjectTypes,
+        target_annotation_id: str,
+        annotation_id: str,
+        job_id: str | None = None,
     ) -> Optional[str]:
         """
         Creates a relationship annotation and dumps it to the target annotation.
@@ -509,14 +609,17 @@ class DatapointManager:
             relationship_name: The relationship key.
             target_annotation_id: The `annotation_id` of the parent `ImageAnnotation`.
             annotation_id: The `annotation_id` to dump the relationship to.
+            job_id: Optional job identifier for async routing.
 
         Returns:
             The `annotation_id` of the parent `ImageAnnotation` for reference if the dump has been successful, or `None`
             if there was a context error.
         """
-        self.assert_datapoint_passed()
+        self.assert_datapoint_passed(job_id)
+        dp = self._resolve_datapoint(job_id)
+        cache_anns = self._resolve_cache_anns(job_id)
         with MappingContextManager(
-            dp_name=self.datapoint.file_name,
+            dp_name=dp.file_name,
             filter_level="annotation",
             relationship_annotation={
                 "relationship_name": relationship_name.value,
@@ -524,7 +627,7 @@ class DatapointManager:
                 "annotation_id": annotation_id,
             },
         ) as annotation_context:
-            self._cache_anns[target_annotation_id].dump_relationship(relationship_name, annotation_id)
+            cache_anns[target_annotation_id].dump_relationship(relationship_name, annotation_id)
         if annotation_context.context_error:
             return None
         return target_annotation_id
@@ -537,6 +640,7 @@ class DatapointManager:
         summary_value: Optional[Union[str, int, float, list[str], dict[str, Any]]] = None,
         summary_score: Optional[float] = None,
         annotation_id: Optional[str] = None,
+        job_id: str | None = None,
     ) -> Optional[str]:
         """
         Creates a subcategory of a summary annotation.
@@ -550,15 +654,18 @@ class DatapointManager:
             summary_value: Creates a `ContainerAnnotation` and stores the corresponding value.
             summary_score: Stores the score.
             annotation_id: The id of the parent annotation. Note that the parent annotation must have `image` not None.
+            job_id: Optional job identifier for async routing.
 
         Returns:
             The `annotation_id` of the generated category annotation, or None if there was a context error.
         """
-        self.assert_datapoint_passed()
+        self.assert_datapoint_passed(job_id)
+        cache_anns = self._resolve_cache_anns(job_id)
+        dp = self._resolve_datapoint(job_id)
         if annotation_id is not None:
-            image = self._cache_anns[annotation_id].image
+            image = cache_anns[annotation_id].image
         else:
-            image = self.datapoint
+            image = dp
         assert image is not None, image
 
         ann: Union[CategoryAnnotation, ContainerAnnotation]
@@ -595,47 +702,53 @@ class DatapointManager:
             return None
         return ann.annotation_id
 
-    def remove_annotations(self, annotation_ids: Sequence[str]) -> None:
+    def remove_annotations(self, annotation_ids: Sequence[str], job_id: str | None = None) -> None:
         """
         Removes the annotation by the given `annotation_id`.
 
         Args:
             annotation_ids: The `annotation_id` to remove.
+            job_id: Optional job identifier for async routing.
         """
-        self.assert_datapoint_passed()
-        self.datapoint.remove(annotation_ids)
+        self.assert_datapoint_passed(job_id)
+        dp = self._resolve_datapoint(job_id)
+        cache_anns = self._resolve_cache_anns(job_id)
+        dp.remove(annotation_ids)
         for ann_id in annotation_ids:
-            if ann_id in self._cache_anns:
-                self._cache_anns.pop(ann_id)
+            if ann_id in cache_anns:
+                cache_anns.pop(ann_id)
 
-    def deactivate_annotation(self, annotation_id: str) -> None:
+    def deactivate_annotation(self, annotation_id: str, job_id: str | None = None) -> None:
         """
         Deactivates the annotation by the given `annotation_id`.
 
         Args:
             annotation_id: The `annotation_id` to deactivate.
+            job_id: Optional job identifier for async routing.
         """
-        ann = self._cache_anns[annotation_id]
+        ann = self._resolve_cache_anns(job_id)[annotation_id]
         ann.deactivate()
 
-    def get_annotation(self, annotation_id: str) -> ImageAnnotation:
+    def get_annotation(self, annotation_id: str, job_id: str | None = None) -> ImageAnnotation:
         """
         Gets a single `ImageAnnotation`.
 
         Args:
             annotation_id: The `annotation_id` of the annotation to retrieve.
+            job_id: Optional job identifier for async routing.
 
         Returns:
             The `ImageAnnotation` corresponding to the given `annotation_id`.
         """
-        return self._cache_anns[annotation_id]
+        return self._resolve_cache_anns(job_id)[annotation_id]
 
-    def get_cached_datapoints(self, last_k: int) -> tuple[Image, ...]:
+    def get_cached_datapoints(self, last_k: int, job_id: str | None = None) -> tuple[Image, ...]:
         """
         Returns a snapshot of the last `last_k` cached datapoints without removing them.
 
         Args:
             last_k: Number of most recently cached datapoints to return. Must be >= 0.
+            job_id: Optional job identifier to retrieve from the correct cache slot.
 
         Returns:
             A tuple containing up to the last `last_k` cached `Image` objects, ordered from older -> newer.
@@ -645,6 +758,5 @@ class DatapointManager:
             raise ValueError("last_k must be >= 0")
         if last_k == 0:
             return tuple()
-
-        doc_id = self.datapoint.document_id
-        return self._cache_store.get_datapoints(document_id=doc_id, last_d=last_k)
+        doc_id = self._resolve_datapoint(job_id).document_id
+        return self._cache_store.get_datapoints(document_id=doc_id, last_d=last_k, job_id=job_id)
