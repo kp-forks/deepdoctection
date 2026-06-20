@@ -156,7 +156,7 @@ def test_save_load_round_trip_preserves_reference_payload(sample_document_json: 
     assert expected  # sanity: the sample document carries a ReferencePayload summary value
 
     # document-level summary value must be a ReferencePayload in memory
-    doc_summary_value = doc.summary.get_sub_category(get_type("key_values")).value
+    doc_summary_value = doc.summary.get_sub_category(get_type("key_values")).value  # type:ignore
     assert isinstance(doc_summary_value, ReferencePayload)
 
     saved_path = doc.save(path=tmp_path)
@@ -165,7 +165,7 @@ def test_save_load_round_trip_preserves_reference_payload(sample_document_json: 
     reloaded = Document.from_json(saved_path)
 
     # value survives the round trip as a ReferencePayload (not a plain dict)
-    reloaded_value = reloaded.summary.get_sub_category(get_type("key_values")).value
+    reloaded_value = reloaded.summary.get_sub_category(get_type("key_values")).value  # type:ignore
     assert isinstance(reloaded_value, ReferencePayload)
 
     # AnnotationRef leaves are reconstructed as AnnotationRef instances, not plain dicts

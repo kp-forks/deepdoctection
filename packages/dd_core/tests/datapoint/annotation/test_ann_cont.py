@@ -160,9 +160,7 @@ class TestContainerAnnotationReferencePayloadSerialization:
 
     def test_reference_payload_value_serializes_with_ref_type_markers(self) -> None:
         """as_dict must emit ``_ref_type`` markers for ReferencePayload/AnnotationRef leaves."""
-        payload = ReferencePayload(
-            content={"h": {"num": [AnnotationRef(image_id="img1", annotation_id="ann1")]}}
-        )
+        payload = ReferencePayload(content={"h": {"num": [AnnotationRef(image_id="img1", annotation_id="ann1")]}})
         container = ContainerAnnotation(category_name="test_cat_1", value=payload)
         assert container.value_type == "reference_payload"
 
@@ -175,9 +173,7 @@ class TestContainerAnnotationReferencePayloadSerialization:
 
     def test_reference_payload_value_round_trips(self) -> None:
         """Construct -> as_dict -> build_container_annotation must recover ReferencePayload + AnnotationRef leaves."""
-        payload = ReferencePayload(
-            content={"h": {"num": [AnnotationRef(image_id="img1", annotation_id="ann1")]}}
-        )
+        payload = ReferencePayload(content={"h": {"num": [AnnotationRef(image_id="img1", annotation_id="ann1")]}})
         container = ContainerAnnotation(category_name="test_cat_1", value=payload)
 
         reloaded = build_container_annotation(container.as_dict())
@@ -191,9 +187,7 @@ class TestContainerAnnotationReferencePayloadSerialization:
     def test_llm_container_reference_payload_round_trips_and_keeps_markers(self) -> None:
         """LLMContainerAnnotation must keep its ``_container_type``/``_annotation_id`` and round-trip the payload."""
         llm_cls = container_annotation_registry.get("llm")
-        payload = ReferencePayload(
-            content={"h": {"num": [AnnotationRef(image_id="img1", annotation_id="ann1")]}}
-        )
+        payload = ReferencePayload(content={"h": {"num": [AnnotationRef(image_id="img1", annotation_id="ann1")]}})
         container = llm_cls(
             category_name="test_cat_1",
             value=payload,
