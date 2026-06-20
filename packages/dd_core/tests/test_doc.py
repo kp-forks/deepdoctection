@@ -179,8 +179,6 @@ def test_save_load_round_trip_preserves_reference_payload(sample_document_json: 
         return False
 
     assert _has_annotation_ref_leaf(reloaded_value.content)
-
-    # full resolution still works and matches the pre-save output
     assert reloaded.structured_output == expected
 
 
