@@ -145,6 +145,43 @@ def test_save_dry_returns_export_dict_with_expected_keys(sample_document_json: P
     assert isinstance(exported, dict)
 
 
+def test_save_load_round_trip_preserves_reference_payload(sample_document_json: Path, tmp_path: Path) -> None:
+    """Document save -> from_json must preserve ReferencePayload values so structured_output still resolves.
+
+    Before the ContainerAnnotation.value field serializer fix, save() stripped the ``_ref_type`` markers and
+    the value came back as a plain dict, breaking resolve_reference_payload/structured_output on reload.
+    """
+    doc = Document.from_json(sample_document_json)
+    expected = doc.structured_output
+    assert expected  # sanity: the sample document carries a ReferencePayload summary value
+
+    # document-level summary value must be a ReferencePayload in memory
+    doc_summary_value = doc.summary.get_sub_category(get_type("key_values")).value  # type:ignore
+    assert isinstance(doc_summary_value, ReferencePayload)
+
+    saved_path = doc.save(path=tmp_path)
+    assert isinstance(saved_path, str)
+
+    reloaded = Document.from_json(saved_path)
+
+    # value survives the round trip as a ReferencePayload (not a plain dict)
+    reloaded_value = reloaded.summary.get_sub_category(get_type("key_values")).value  # type:ignore
+    assert isinstance(reloaded_value, ReferencePayload)
+
+    # AnnotationRef leaves are reconstructed as AnnotationRef instances, not plain dicts
+    def _has_annotation_ref_leaf(node: object) -> bool:
+        if isinstance(node, AnnotationRef):
+            return True
+        if isinstance(node, dict):
+            return any(_has_annotation_ref_leaf(v) for v in node.values())
+        if isinstance(node, list):
+            return any(_has_annotation_ref_leaf(v) for v in node)
+        return False
+
+    assert _has_annotation_ref_leaf(reloaded_value.content)
+    assert reloaded.structured_output == expected
+
+
 def test_get_annotation_id_with_given_image_id(sample_document_json: Path) -> None:
     """test get annotation id with given image id"""
     doc = Document.from_json(sample_document_json)

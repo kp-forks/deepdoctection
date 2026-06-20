@@ -25,14 +25,19 @@ ensures the integrity of data encapsulated in the annotation
 objects and helps enforce correct behavior under various conditions.
 """
 
+import json
 import re
 
 import pytest
 from pydantic import ValidationError
 
 from dd_core.datapoint.annotation import (
+    AnnotationRef,
     CategoryAnnotation,
     ContainerAnnotation,
+    ReferencePayload,
+    build_container_annotation,
+    container_annotation_registry,
 )
 from dd_core.utils.object_types import get_type
 
@@ -148,3 +153,89 @@ class TestContainerAnnotationAdvanced:
         container2 = ContainerAnnotation(category_name="test_cat_1", value="string_value")
         with pytest.raises(TypeError):
             container2.set_type("int")
+
+
+class TestContainerAnnotationReferencePayloadSerialization:
+    """Tests for serialization/round-trip of ReferencePayload/AnnotationRef container values."""
+
+    def test_reference_payload_value_serializes_with_ref_type_markers(self) -> None:
+        """as_dict must emit ``_ref_type`` markers for ReferencePayload/AnnotationRef leaves."""
+        payload = ReferencePayload(content={"h": {"num": [AnnotationRef(image_id="img1", annotation_id="ann1")]}})
+        container = ContainerAnnotation(category_name="test_cat_1", value=payload)
+        assert container.value_type == "reference_payload"
+
+        data = container.as_dict()
+        assert "_ref_type" in json.dumps(data["value"], default=str)
+        assert data["value"] == {
+            "_ref_type": "reference_payload",
+            "content": {"h": {"num": [{"_ref_type": "annotation_ref", "image_id": "img1", "annotation_id": "ann1"}]}},
+        }
+
+    def test_reference_payload_value_round_trips(self) -> None:
+        """Construct -> as_dict -> build_container_annotation must recover ReferencePayload + AnnotationRef leaves."""
+        payload = ReferencePayload(content={"h": {"num": [AnnotationRef(image_id="img1", annotation_id="ann1")]}})
+        container = ContainerAnnotation(category_name="test_cat_1", value=payload)
+
+        reloaded = build_container_annotation(container.as_dict())
+
+        assert isinstance(reloaded.value, ReferencePayload)
+        assert reloaded.value_type == "reference_payload"
+        leaf = reloaded.value.content["h"]["num"][0]
+        assert isinstance(leaf, AnnotationRef)
+        assert leaf == AnnotationRef(image_id="img1", annotation_id="ann1")
+
+    def test_llm_container_reference_payload_round_trips_and_keeps_markers(self) -> None:
+        """LLMContainerAnnotation must keep its ``_container_type``/``_annotation_id`` and round-trip the payload."""
+        llm_cls = container_annotation_registry.get("llm")
+        payload = ReferencePayload(content={"h": {"num": [AnnotationRef(image_id="img1", annotation_id="ann1")]}})
+        container = llm_cls(
+            category_name="test_cat_1",
+            value=payload,
+            task_id="t",
+            prompt_id="p",
+            output_format_id="o",
+            model_id="m",
+        )
+
+        data = container.as_dict()
+        assert data["_container_type"] == "llm"
+        assert "_annotation_id" in data
+        assert "_ref_type" in json.dumps(data["value"], default=str)
+
+        reloaded = build_container_annotation(data)
+        assert type(reloaded).__name__ == "LLMContainerAnnotation"
+        assert isinstance(reloaded.value, ReferencePayload)
+        assert isinstance(reloaded.value.content["h"]["num"][0], AnnotationRef)
+
+    @pytest.mark.parametrize(
+        "value, expected_type",
+        [
+            ("hello", "str"),
+            (42, "int"),
+            (3.14, "float"),
+            (["a", "b"], "list[str]"),
+            ({"a": 1, "b": {"nested": True}}, "dict[str,Any]"),
+        ],
+    )
+    def test_plain_values_round_trip_unchanged(self, value: object, expected_type: str) -> None:
+        """Plain values must serialize unchanged (to_json_compatible is a no-op) and round-trip exactly."""
+        container = ContainerAnnotation(category_name="test_cat_1", value=value)
+        assert container.value_type == expected_type
+
+        data = container.as_dict()
+        assert data["value"] == value
+
+        reloaded = build_container_annotation(data)
+        assert reloaded.value == value
+        assert reloaded.value_type == expected_type
+
+    def test_legacy_dict_without_markers_loads_without_error(self) -> None:
+        """Backward compat: a value dict written before the fix (no markers) loads as plain dict, no exception."""
+        legacy = {
+            "category_name": "test_cat_1",
+            "value": {"h": {"num": [{"image_id": "img1", "annotation_id": "ann1"}]}},
+        }
+        reloaded = build_container_annotation(legacy)
+        assert isinstance(reloaded.value, dict)
+        assert reloaded.value_type == "dict[str,Any]"
+        assert reloaded.value == {"h": {"num": [{"image_id": "img1", "annotation_id": "ann1"}]}}

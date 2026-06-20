@@ -28,7 +28,16 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Mapping, Optional, Type, TypeVar, Union
 
 import catalogue  # type: ignore
-from pydantic import BaseModel, Field, PrivateAttr, SerializeAsAny, field_validator, model_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    field_serializer,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from ..utils.error import AnnotationError, UUIDError
 from ..utils.identifier import get_uuid, is_uuid_like
@@ -880,6 +889,14 @@ class ContainerAnnotation(CategoryAnnotation):
                 return from_json_compatible(parsed)
 
         return from_json_compatible(value)
+
+    @field_serializer("value")
+    def _serialize_value(self, value: Any, _info: Any) -> Any:
+        """Serialize ``value`` so that any nested ``ReferencePayload``/``AnnotationRef`` instances are written
+        with their ``_ref_type`` discriminator markers. ``to_json_compatible`` is a no-op for plain
+        ``str``/``int``/``float``/``list[str]``/``dict[str, Any]`` values.
+        """
+        return to_json_compatible(value)
 
     @model_validator(mode="after")
     def _coerce_or_infer_value_validator(self) -> ContainerAnnotation:
